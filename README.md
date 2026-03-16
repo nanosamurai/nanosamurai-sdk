@@ -1,11 +1,11 @@
 # nanosamurai-sdk
 
-Python SDK + CLI for the **nanosamur.ai** API (samuraibff).
+Python SDK + CLI for the **nanosamur.ai** API
 
 This SDK targets the **machine-to-machine (M2M)** use-case:
 
 - you create M2M credentials in the samuraibff UI (`/api-credentials`)
-- you mint tokens via **Keycloak** using `client_credentials`
+- you mint tokens via **nanosamurai's auth service** using `client_credentials`
 - you call the BFF REST API and WebSockets with `Authorization: Bearer <token>`
 
 ## Install (dev)
@@ -18,8 +18,8 @@ pip install -e .[dev]
 
 The CLI (and examples) read configuration from:
 
-- `NANOSAMURAI_API_URL` – base URL of samuraibff (e.g. `http://127.0.0.1:8000`)
-- `NANOSAMURAI_ISSUER` – Keycloak realm issuer (e.g. `https://auth.nanosamur.ai/realms/nanosamurai`)
+- `NANOSAMURAI_API_URL` – base URL of samuraibff (e.g. `https://platform.nanosamur.ai`)
+- `NANOSAMURAI_ISSUER` – nanosamurai realm issuer (e.g. `https://auth.nanosamur.ai/realms/nanosamurai`)
 - `NANOSAMURAI_CLIENT_ID`
 - `NANOSAMURAI_CLIENT_SECRET`
 
