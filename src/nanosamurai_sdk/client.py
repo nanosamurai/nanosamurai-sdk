@@ -1,0 +1,292 @@
+"""High-level nanosamurai client.
+
+This client covers the endpoints that make sense for 3rd parties:
+
+- REST:
+  - POST /api/sessions
+  - GET /api/recordings
+  - GET /api/recordings/:session_id
+
+- WebSockets:
+  - /ws/events (JSON text messages)
+  - /ws/audio (binary PCM16LE frames)
+
+Auth model:
+- Uses OAuth2 client_credentials against Keycloak to mint an access token.
+- Sends `Authorization: Bearer <token>` to REST + WS.
+
+All WS methods are async.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+from typing import Any, AsyncIterator, Iterable
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse
+
+import httpx
+import websockets
+
+from .errors import ApiError, WsError
+from .token import KeycloakM2MTokenProvider
+
+
+@dataclass(frozen=True)
+class RecordingItem:
+    """A single item from `GET /api/recordings`."""
+
+    session_id: str
+    session_key: str | None
+    status: str | None
+    started_at: str | None
+    ended_at: str | None
+    created_at: str | None
+    has_recording: bool | None
+    has_final_transcript: bool | None
+
+
+class NanosamuraiClient:
+    """SDK client for samuraibff.
+
+    Inputs:
+        api_url: Base URL of the BFF (e.g. `http://127.0.0.1:8000` or `https://bff...`).
+        issuer: Keycloak realm issuer (for discovery).
+        client_id: M2M client id.
+        client_secret: M2M client secret.
+        timeout_s: REST timeout.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_url: str,
+        issuer: str,
+        client_id: str,
+        client_secret: str,
+        timeout_s: float = 10.0,
+    ) -> None:
+        self._api_url = api_url.rstrip("/") + "/"
+        self._timeout_s = timeout_s
+        self._token_provider = KeycloakM2MTokenProvider(
+            issuer=issuer,
+            client_id=client_id,
+            client_secret=client_secret,
+            timeout_s=timeout_s,
+        )
+
+    # -----------------
+    # Auth
+    # -----------------
+
+    def get_access_token(self) -> str:
+        """Return a valid access token (cached in-memory)."""
+
+        return self._token_provider.get_access_token()
+
+    def _authz_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.get_access_token()}"}
+
+    # -----------------
+    # REST helpers
+    # -----------------
+
+    def _rest_url(self, path: str) -> str:
+        return urljoin(self._api_url, path.lstrip("/"))
+
+    def create_session(self) -> str:
+        """Create a new session id.
+
+        Calls: POST /api/sessions
+
+        Returns:
+            session_id (UUID string)
+        """
+
+        url = self._rest_url("/api/sessions")
+        with httpx.Client(timeout=self._timeout_s) as client:
+            resp = client.post(url, headers=self._authz_headers())
+        if resp.status_code // 100 != 2:
+            raise ApiError(
+                "Failed to create session",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        data = resp.json()
+        sid = data.get("session_id")
+        if not isinstance(sid, str) or not sid:
+            raise ApiError("Invalid response from /api/sessions", status_code=resp.status_code, body=resp.text)
+        return sid
+
+    def list_recordings(self, *, limit: int = 200, offset: int = 0) -> list[RecordingItem]:
+        """List recordings/sessions for the authenticated tenant.
+
+        Calls: GET /api/recordings
+        """
+
+        url = self._rest_url(f"/api/recordings?{urlencode({'limit': limit, 'offset': offset})}")
+        with httpx.Client(timeout=self._timeout_s) as client:
+            resp = client.get(url, headers=self._authz_headers())
+        if resp.status_code // 100 != 2:
+            raise ApiError("Failed to list recordings", status_code=resp.status_code, body=resp.text)
+
+        payload = resp.json()
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise ApiError("Invalid response from /api/recordings", status_code=resp.status_code, body=resp.text)
+
+        out: list[RecordingItem] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            sid = it.get("session_id")
+            if not isinstance(sid, str):
+                continue
+            out.append(
+                RecordingItem(
+                    session_id=sid,
+                    session_key=it.get("session_key"),
+                    status=it.get("status"),
+                    started_at=it.get("started_at"),
+                    ended_at=it.get("ended_at"),
+                    created_at=it.get("created_at"),
+                    has_recording=it.get("has_recording"),
+                    has_final_transcript=it.get("has_final_transcript"),
+                )
+            )
+        return out
+
+    def get_recording(self, session_id: str) -> dict[str, Any]:
+        """Fetch recording detail, including transcripts.
+
+        Calls: GET /api/recordings/:session_id
+
+        Returns:
+            Parsed JSON as a dict.
+        """
+
+        url = self._rest_url(f"/api/recordings/{session_id}")
+        with httpx.Client(timeout=self._timeout_s) as client:
+            resp = client.get(url, headers=self._authz_headers())
+        if resp.status_code // 100 != 2:
+            raise ApiError("Failed to fetch recording", status_code=resp.status_code, body=resp.text)
+        return resp.json()
+
+    # -----------------
+    # WS helpers
+    # -----------------
+
+    def _ws_url(self, path: str, query: dict[str, Any] | None = None) -> str:
+        """Convert api_url (http/https) into ws/wss and join path."""
+
+        parsed = urlparse(self._api_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        base = parsed._replace(scheme=scheme)
+        base_str = urlunparse(base)
+        url = urljoin(base_str, path.lstrip("/"))
+        if query:
+            url = url + ("?" + urlencode(query))
+        return url
+
+    async def _ws_connect(self, url: str):
+        try:
+            return await websockets.connect(
+                url,
+                extra_headers=self._authz_headers(),
+                max_size=8 * 1024 * 1024,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise WsError(f"Failed to connect websocket: {url}") from e
+
+    async def iter_events(self, *, session_id: str) -> AsyncIterator[dict[str, Any]]:
+        """Connect to `/ws/events` and yield parsed JSON events.
+
+        Yields:
+            Event dicts with at least keys like `type`, `session_id`, `seq`, `ts_ms`.
+        """
+
+        url = self._ws_url("/ws/events", {"session_id": session_id})
+        ws = await self._ws_connect(url)
+        try:
+            async for msg in ws:
+                if isinstance(msg, bytes):
+                    # server should send text; ignore binary
+                    continue
+                try:
+                    data = json.loads(msg)
+                except Exception as e:  # noqa: BLE001
+                    raise WsError("Received non-JSON message on /ws/events") from e
+                if isinstance(data, dict):
+                    yield data
+        finally:
+            await ws.close()
+
+    async def transcribe_pcm(
+        self,
+        *,
+        session_id: str,
+        pcm_frames: Iterable[bytes],
+        lang: str = "",
+        sample_rate: int = 16000,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream PCM16LE frames to `/ws/audio` while yielding `/ws/events`.
+
+        Inputs:
+            session_id: Must already exist (create via `create_session`).
+            pcm_frames: Iterable of PCM16LE byte chunks.
+            lang: Language code ("en", "cs", "")
+            sample_rate: Sample rate (default 16000)
+
+        Returns:
+            Async iterator of event dicts.
+
+        Notes:
+            This opens two websocket connections:
+            - events: receives events
+            - audio: sends frames
+        """
+
+        events_url = self._ws_url("/ws/events", {"session_id": session_id})
+        audio_url = self._ws_url(
+            "/ws/audio",
+            {"session_id": session_id, "lang": lang, "sample_rate": sample_rate},
+        )
+
+        events_ws = await self._ws_connect(events_url)
+        audio_ws = await self._ws_connect(audio_url)
+
+        async def _send_audio() -> None:
+            try:
+                for frame in pcm_frames:
+                    if not isinstance(frame, (bytes, bytearray, memoryview)):
+                        raise WsError("pcm_frames must yield bytes-like objects")
+                    await audio_ws.send(bytes(frame))
+            finally:
+                # half-close isn't supported; just close.
+                await audio_ws.close()
+
+        send_task = None
+        try:
+            import asyncio
+
+            send_task = asyncio.create_task(_send_audio())
+            async for msg in events_ws:
+                if isinstance(msg, bytes):
+                    continue
+                evt = json.loads(msg)
+                if isinstance(evt, dict):
+                    yield evt
+        except json.JSONDecodeError as e:
+            raise WsError("Received invalid JSON on /ws/events") from e
+        except Exception as e:  # noqa: BLE001
+            raise WsError("Websocket transcription failed") from e
+        finally:
+            try:
+                await events_ws.close()
+            finally:
+                if send_task is not None:
+                    try:
+                        await send_task
+                    except Exception:
+                        # audio send failures shouldn't mask event close
+                        pass
