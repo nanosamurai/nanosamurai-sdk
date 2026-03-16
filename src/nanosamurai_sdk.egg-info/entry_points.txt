@@ -1,0 +1,2 @@
+[console_scripts]
+nanosamurai = nanosamurai_sdk.cli:main
