@@ -14,3 +14,10 @@ build/
 # venvs
 .venv/
 venv/
+
+# local test artifacts
+out.json
+err.log
+transcribe_*.log
+transcribe_*.txt
+transcribe_*.jsonl
