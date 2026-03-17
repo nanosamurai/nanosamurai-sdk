@@ -14,6 +14,12 @@ This SDK targets the **machine-to-machine (M2M)** use-case:
 pip install -e .[dev]
 ```
 
+## Install (normal)
+
+```bash
+pip install nanosamurai-sdk
+```
+
 ## Environment variables
 
 The CLI (and examples) read configuration from:
@@ -25,10 +31,23 @@ The CLI (and examples) read configuration from:
 
 ## CLI
 
+If the `nanosamurai` script isn't on your PATH (common on Windows), you can
+invoke the CLI via the module entrypoint:
+
+```bash
+python -m nanosamurai_sdk --help
+```
+
 ### Get an access token
 
 ```bash
 nanosamurai token
+```
+
+Or:
+
+```bash
+python -m nanosamurai_sdk token
 ```
 
 ### List recordings
@@ -53,34 +72,76 @@ Notes:
 - for MVP, the CLI validates the WAV is **mono 16-bit PCM @ 16kHz**.
 - the BFF expects PCM16LE frames on `/ws/audio`.
 
-## Python usage
+## Python SDK usage
+
+### REST: create session + list recordings
 
 ```python
-import asyncio
+import os
 from nanosamurai_sdk import NanosamuraiClient
 
 
-async def main():
+client = NanosamuraiClient(
+    api_url=os.environ["NANOSAMURAI_API_URL"],
+    issuer=os.environ["NANOSAMURAI_ISSUER"],
+    client_id=os.environ["NANOSAMURAI_CLIENT_ID"],
+    client_secret=os.environ["NANOSAMURAI_CLIENT_SECRET"],
+)
+
+session_id = client.create_session()
+print("session_id", session_id)
+
+items = client.list_recordings(limit=10, offset=0)
+print("recordings", len(items))
+```
+
+### WebSockets: transcribe a WAV file (stream audio + receive events)
+
+The BFF expects **PCM16LE mono @ 16kHz** frames sent as **binary** messages to
+`/ws/audio`, while transcription events are received as JSON text messages from
+`/ws/events`.
+
+This example reuses the SDK's WAV helper which validates the format and yields
+PCM frames in ~100ms chunks.
+
+```python
+import asyncio
+import os
+
+from nanosamurai_sdk import NanosamuraiClient
+from nanosamurai_sdk.audio import wav_to_pcm_frames
+
+
+async def main() -> None:
     client = NanosamuraiClient(
-        api_url="http://127.0.0.1:8000",
-        issuer="https://auth.nanosamur.ai/realms/nanosamurai",
-        client_id="...",
-        client_secret="...",
+        api_url=os.environ["NANOSAMURAI_API_URL"],
+        issuer=os.environ["NANOSAMURAI_ISSUER"],
+        client_id=os.environ["NANOSAMURAI_CLIENT_ID"],
+        client_secret=os.environ["NANOSAMURAI_CLIENT_SECRET"],
     )
 
     session_id = client.create_session()
 
-    # pcm_frames must yield bytes of PCM16LE mono
-    pcm_frames = [b"\x00\x00" * 1600]
+    frames = wav_to_pcm_frames(
+        "path/to/audio.wav",
+        expected_sample_rate=16000,
+        frame_bytes=3200,  # 100ms @ 16kHz mono PCM16
+    )
 
     async for evt in client.transcribe_pcm(
         session_id=session_id,
-        pcm_frames=pcm_frames,
-        lang="en",
+        pcm_frames=frames,
+        lang="cs",  # or "en", etc.
         sample_rate=16000,
     ):
+        # evt is a dict, typically with keys: type, session_id, seq, ts_ms, ...
         print(evt)
 
+        # optional: stop on first final ASR message
+        if evt.get("type") in ("refined", "asr") and evt.get("final") is True:
+            break
 
-asyncio.run(main())
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
