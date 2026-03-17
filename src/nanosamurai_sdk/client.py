@@ -21,6 +21,7 @@ All WS methods are async.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 import json
 from typing import Any, AsyncIterator, Iterable
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
@@ -190,9 +191,20 @@ class NanosamuraiClient:
 
     async def _ws_connect(self, url: str):
         try:
+            # websockets renamed `extra_headers` -> `additional_headers` in newer
+            # versions (e.g. websockets 16). To keep the SDK flexible across
+            # environments, detect the supported kwarg at runtime.
+            headers = self._authz_headers()
+            connect_sig = inspect.signature(websockets.connect)
+            if "additional_headers" in connect_sig.parameters:
+                return await websockets.connect(
+                    url,
+                    additional_headers=headers,
+                    max_size=8 * 1024 * 1024,
+                )
             return await websockets.connect(
                 url,
-                extra_headers=self._authz_headers(),
+                extra_headers=headers,
                 max_size=8 * 1024 * 1024,
             )
         except Exception as e:  # noqa: BLE001
