@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import asdict
 import json
 import os
 import sys
@@ -157,7 +158,7 @@ def main(argv: list[str] | None = None) -> None:
         if args._cmd == "recordings_list":
             client = _build_client(args)
             items = client.list_recordings(limit=args.limit, offset=args.offset)
-            _print_json([item.__dict__ for item in items])
+            _print_json([asdict(item) for item in items])
             return
 
         if args._cmd == "recordings_get":
