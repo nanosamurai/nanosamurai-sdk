@@ -62,6 +62,12 @@ nanosamurai recordings list
 nanosamurai recordings get <session_id>
 ```
 
+### Download recording audio (WAV)
+
+```bash
+nanosamurai recordings audio <session_id> --out out.wav
+```
+
 ### Transcribe a WAV file (streams to WS)
 
 ```bash
@@ -74,7 +80,7 @@ Notes:
 
 ## Python SDK usage
 
-### REST: create session + list recordings
+### REST: list recordings
 
 ```python
 import os
@@ -87,9 +93,6 @@ client = NanosamuraiClient(
     client_id=os.environ["NANOSAMURAI_CLIENT_ID"],
     client_secret=os.environ["NANOSAMURAI_CLIENT_SECRET"],
 )
-
-session_id = client.create_session()
-print("session_id", session_id)
 
 items = client.list_recordings(limit=10, offset=0)
 print("recordings", len(items))
@@ -131,13 +134,16 @@ async def main() -> None:
     async for evt in client.transcribe_pcm(
         session_id=session_id,
         pcm_frames=frames,
-        lang="cs",  # or "en", etc.
+        lang="en",  # or "de", etc.
         sample_rate=16000,
     ):
         # evt is a dict, typically with keys: type, session_id, seq, ts_ms, ...
         print(evt)
 
-        # optional: stop on first final ASR message
+        # optional: stop on first final ASR message.
+        # NOTE: the realtime ASR service emits multiple PARTIAL events and then
+        # a FINAL event *per window*; this will therefore usually stop before
+        # the whole audio is fully transcribed.
         if evt.get("type") in ("refined", "asr") and evt.get("final") is True:
             break
 

@@ -6,6 +6,7 @@ This client covers the endpoints that make sense for 3rd parties:
   - POST /api/sessions
   - GET /api/recordings
   - GET /api/recordings/:session_id
+  - GET /api/recordings/:session_id/audio
 
 - WebSockets:
   - /ws/events (JSON text messages)
@@ -45,6 +46,23 @@ class RecordingItem:
     created_at: str | None
     has_recording: bool | None
     has_final_transcript: bool | None
+    recording: "RecordingInfo | None" = None
+
+
+@dataclass(frozen=True)
+class RecordingInfo:
+    """Recording metadata attached to a RecordingItem.
+
+    This corresponds to the nested `recording` object returned by the BFF.
+
+    Fields are best-effort and may be null/absent depending on the persistence
+    state.
+    """
+
+    created_at: str | None
+    duration_s: float | None
+    sample_rate: int | None
+    lang: str | None
 
 
 class NanosamuraiClient:
@@ -143,6 +161,16 @@ class NanosamuraiClient:
             sid = it.get("session_id")
             if not isinstance(sid, str):
                 continue
+            rec_info: RecordingInfo | None = None
+            rec = it.get("recording")
+            if isinstance(rec, dict):
+                rec_info = RecordingInfo(
+                    created_at=rec.get("created_at"),
+                    duration_s=rec.get("duration_s"),
+                    sample_rate=rec.get("sample_rate"),
+                    lang=rec.get("lang"),
+                )
+
             out.append(
                 RecordingItem(
                     session_id=sid,
@@ -153,6 +181,7 @@ class NanosamuraiClient:
                     created_at=it.get("created_at"),
                     has_recording=it.get("has_recording"),
                     has_final_transcript=it.get("has_final_transcript"),
+                    recording=rec_info,
                 )
             )
         return out
@@ -172,6 +201,101 @@ class NanosamuraiClient:
         if resp.status_code // 100 != 2:
             raise ApiError("Failed to fetch recording", status_code=resp.status_code, body=resp.text)
         return resp.json()
+
+    def get_recording_audio_bytes(
+        self,
+        session_id: str,
+        *,
+        range_start: int | None = None,
+        range_end: int | None = None,
+    ) -> bytes:
+        """Fetch recording audio (WAV) as bytes.
+
+        Calls: GET /api/recordings/:session_id/audio
+
+        Inputs:
+            session_id: Session UUID.
+            range_start: Optional Range start byte (inclusive).
+            range_end: Optional Range end byte (inclusive).
+
+        Returns:
+            Response body bytes.
+
+        Notes:
+            - If `range_start`/`range_end` are provided, the SDK sends a
+              `Range: bytes=start-end` header.
+            - For large recordings, prefer `download_recording_audio()`.
+        """
+
+        if range_start is None and range_end is not None:
+            # BFF currently does not implement suffix ranges (bytes=-N).
+            raise ValueError("range_end without range_start is not supported")
+
+        url = self._rest_url(f"/api/recordings/{session_id}/audio")
+        headers = dict(self._authz_headers())
+        if range_start is not None or range_end is not None:
+            a = "" if range_start is None else str(int(range_start))
+            b = "" if range_end is None else str(int(range_end))
+            headers["Range"] = f"bytes={a}-{b}"
+
+        with httpx.Client(timeout=self._timeout_s) as client:
+            resp = client.get(url, headers=headers)
+
+        if resp.status_code // 100 != 2:
+            raise ApiError(
+                "Failed to fetch recording audio",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        return resp.content
+
+    def download_recording_audio(
+        self,
+        session_id: str,
+        out_path: str,
+        *,
+        chunk_size: int = 1024 * 1024,
+        range_start: int | None = None,
+        range_end: int | None = None,
+    ) -> None:
+        """Download recording audio (WAV) to a local file.
+
+        Calls: GET /api/recordings/:session_id/audio
+
+        Inputs:
+            session_id: Session UUID.
+            out_path: Output filesystem path.
+            chunk_size: Streaming chunk size in bytes.
+            range_start/range_end: Optional Range start/end bytes.
+
+        Raises:
+            ApiError on non-2xx.
+        """
+
+        if range_start is None and range_end is not None:
+            # BFF currently does not implement suffix ranges (bytes=-N).
+            raise ValueError("range_end without range_start is not supported")
+
+        url = self._rest_url(f"/api/recordings/{session_id}/audio")
+        headers = dict(self._authz_headers())
+        if range_start is not None or range_end is not None:
+            a = "" if range_start is None else str(int(range_start))
+            b = "" if range_end is None else str(int(range_end))
+            headers["Range"] = f"bytes={a}-{b}"
+
+        with httpx.Client(timeout=self._timeout_s) as client:
+            with client.stream("GET", url, headers=headers) as resp:
+                if resp.status_code // 100 != 2:
+                    body = resp.read().decode("utf-8", errors="replace")
+                    raise ApiError(
+                        "Failed to download recording audio",
+                        status_code=resp.status_code,
+                        body=body,
+                    )
+                with open(out_path, "wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=chunk_size):
+                        if chunk:
+                            f.write(chunk)
 
     # -----------------
     # WS helpers
