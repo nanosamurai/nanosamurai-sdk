@@ -10,6 +10,7 @@ Subcommands:
   - token
   - recordings list
   - recordings get <session_id>
+  - recordings audio <session_id> --out <path>
   - transcribe wav <path>
 """
 
@@ -72,6 +73,14 @@ def _print_json(obj: Any) -> None:
     sys.stdout.write("\n")
 
 
+def _cmd_recordings_audio(args: argparse.Namespace) -> int:
+    client = _build_client(args)
+    if not args.out:
+        raise SystemExit("--out is required")
+    client.download_recording_audio(args.session_id, args.out)
+    return 0
+
+
 async def _cmd_transcribe_wav(args: argparse.Namespace) -> int:
     client = _build_client(args)
     session_id = args.session_id or client.create_session()
@@ -116,6 +125,11 @@ def main(argv: list[str] | None = None) -> None:
     p_rec_get.add_argument("session_id")
     p_rec_get.set_defaults(_cmd="recordings_get")
 
+    p_rec_audio = rec_sub.add_parser("audio", help="Download recording audio (WAV)")
+    p_rec_audio.add_argument("session_id")
+    p_rec_audio.add_argument("--out", required=True, help="Output .wav path")
+    p_rec_audio.set_defaults(_cmd="recordings_audio")
+
     # transcribe
     p_transcribe = sub.add_parser("transcribe", help="Transcription commands")
     t_sub = p_transcribe.add_subparsers(dest="transcribe_cmd", required=True)
@@ -128,7 +142,7 @@ def main(argv: list[str] | None = None) -> None:
     p_wav.add_argument(
         "--stop-on-final",
         action="store_true",
-        help="Stop when first final ASR event is received",
+        help="Stop when the first final ASR event is received (final-per-window semantics)",
     )
     p_wav.set_defaults(_cmd="transcribe_wav")
 
@@ -150,6 +164,9 @@ def main(argv: list[str] | None = None) -> None:
             client = _build_client(args)
             _print_json(client.get_recording(args.session_id))
             return
+
+        if args._cmd == "recordings_audio":
+            raise SystemExit(_cmd_recordings_audio(args))
 
         if args._cmd == "transcribe_wav":
             raise SystemExit(asyncio.run(_cmd_transcribe_wav(args)))
