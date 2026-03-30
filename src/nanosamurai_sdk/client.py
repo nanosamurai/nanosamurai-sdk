@@ -364,6 +364,9 @@ class NanosamuraiClient:
         pcm_frames: Iterable[bytes],
         lang: str = "",
         sample_rate: int = 16000,
+        window_size: float | None = None,
+        overlap: float | None = None,
+        emit_every: float | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream PCM16LE frames to `/ws/audio` while yielding `/ws/events`.
 
@@ -372,6 +375,12 @@ class NanosamuraiClient:
             pcm_frames: Iterable of PCM16LE byte chunks.
             lang: Language code ("en", "cs", "")
             sample_rate: Sample rate (default 16000)
+            window_size: Optional realtime ASR window size in seconds.
+                Mapped to the BFF's `/ws/audio` query param `rt_window_sec`.
+            overlap: Optional realtime ASR overlap in seconds.
+                Mapped to the BFF's `/ws/audio` query param `rt_overlap_sec`.
+            emit_every: Optional realtime ASR emit frequency in seconds.
+                Mapped to the BFF's `/ws/audio` query param `rt_emit_every_sec`.
 
         Returns:
             Async iterator of event dicts.
@@ -383,10 +392,19 @@ class NanosamuraiClient:
         """
 
         events_url = self._ws_url("/ws/events", {"session_id": session_id})
-        audio_url = self._ws_url(
-            "/ws/audio",
-            {"session_id": session_id, "lang": lang, "sample_rate": sample_rate},
-        )
+        audio_q: dict[str, Any] = {
+            "session_id": session_id,
+            "lang": lang,
+            "sample_rate": sample_rate,
+        }
+        if window_size is not None:
+            audio_q["rt_window_sec"] = float(window_size)
+        if overlap is not None:
+            audio_q["rt_overlap_sec"] = float(overlap)
+        if emit_every is not None:
+            audio_q["rt_emit_every_sec"] = float(emit_every)
+
+        audio_url = self._ws_url("/ws/audio", audio_q)
 
         events_ws = await self._ws_connect(events_url)
         audio_ws = await self._ws_connect(audio_url)
