@@ -10,8 +10,47 @@ This SDK targets the **machine-to-machine (M2M)** use-case:
 
 ## Install (dev)
 
+### Virtual environment (recommended)
+
+This repository does **not** commit a `.venv/` folder (it is intentionally in
+`.gitignore`). If you clone the repo and `pip`/`python` commands seem to “not
+work”, you most likely don’t have an activated virtual environment (or you’re
+using a different Python interpreter than the one you installed into).
+
+Create and activate a venv:
+
 ```bash
-pip install -e .[dev]
+python -m venv .venv
+```
+
+Activate it:
+
+- Windows (PowerShell):
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+  If PowerShell refuses to run scripts, either:
+  - run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or
+  - use the **cmd.exe** activation below.
+
+- Windows (cmd.exe):
+
+```bat
+.venv\Scripts\activate.bat
+```
+
+- macOS / Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+Then install:
+
+```bash
+python -m pip install -e ".[dev]"
 ```
 
 ## Install (normal)
@@ -35,6 +74,13 @@ If the `nanosamurai` script isn't on your PATH (common on Windows), you can
 invoke the CLI via the module entrypoint:
 
 ```bash
+python -m nanosamurai_sdk --help
+```
+
+Tip: when in doubt about which Python you are using (venv vs. global), prefer:
+
+```bash
+python -m pip --version
 python -m nanosamurai_sdk --help
 ```
 
