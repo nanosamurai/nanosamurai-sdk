@@ -197,3 +197,174 @@ async def main() -> None:
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+## WebSockets API (realtime ASR)
+
+The REST API is documented in Swagger (`/docs`) but WebSockets are currently not
+modeled in the OpenAPI spec. This section documents the realtime ASR WS
+contract as implemented by **samuraibff**.
+
+### Overview: two WebSocket connections
+
+Realtime transcription uses two WebSockets:
+
+1) **Events** (server → client):
+
+```
+GET /ws/events?session_id=<uuid>
+```
+
+Receives JSON text messages.
+
+2) **Audio** (client → server):
+
+```
+GET /ws/audio?session_id=<uuid>&lang=<code>&sample_rate=16000
+```
+
+Sends raw audio frames as **binary** messages:
+- encoding: **PCM16LE**
+- channels: **mono**
+- sample rate: typically **16kHz**
+
+Auth: both endpoints require `Authorization: Bearer <token>` during the WS
+upgrade (same token as for REST).
+
+### Session lifecycle
+
+For authenticated deployments, you must create a session first:
+
+```
+POST /api/sessions -> {"session_id": "..."}
+```
+
+Then connect `/ws/events` and `/ws/audio` with that `session_id`.
+
+### Event types
+
+All events share these common fields:
+
+- `type`: one of `status`, `error`, `asr`, `refined`
+- `session_id`: the session UUID
+- `seq`: monotonic per-session sequence number
+- `ts_ms`: event timestamp (epoch milliseconds)
+
+#### status
+
+Example:
+
+```json
+{
+  "type": "status",
+  "session_id": "2d5f4b0c-5f83-4b6e-9b6a-5e4d52f1b5c0",
+  "seq": 1,
+  "ts_ms": 1711800000000,
+  "status": "connected",
+  "detail": "events-ws"
+}
+```
+
+#### asr: PARTIAL vs FINAL
+
+Realtime ASR events have `type="asr"` and a `final` flag:
+
+- `final=false` → **PARTIAL** hypothesis (replaceable)
+- `final=true`  → **FINAL** for a completed window (locking)
+
+The realtime service typically emits **multiple PARTIAL events** and then a
+**FINAL event per window**.
+
+PARTIAL example (`final=false`):
+
+```json
+{
+  "type": "asr",
+  "session_id": "2d5f4b0c-5f83-4b6e-9b6a-5e4d52f1b5c0",
+  "seq": 12,
+  "ts_ms": 1711800001234,
+  "start_s": 10.0,
+  "end_s": 15.0,
+  "text": "hello wor",
+  "lang": "en",
+  "speaker": "SPEAKER_00",
+  "final": false
+}
+```
+
+FINAL example (`final=true`):
+
+```json
+{
+  "type": "asr",
+  "session_id": "2d5f4b0c-5f83-4b6e-9b6a-5e4d52f1b5c0",
+  "seq": 13,
+  "ts_ms": 1711800001890,
+  "start_s": 10.0,
+  "end_s": 15.0,
+  "text": "hello world",
+  "lang": "en",
+  "speaker": "SPEAKER_00",
+  "final": true
+}
+```
+
+#### refined
+
+Refined transcript segments (e.g. WhisperX) are pushed later over the same
+`/ws/events` socket:
+
+```json
+{
+  "type": "refined",
+  "session_id": "2d5f4b0c-5f83-4b6e-9b6a-5e4d52f1b5c0",
+  "seq": 200,
+  "ts_ms": 1711800123456,
+  "start_s": 10.0,
+  "end_s": 15.0,
+  "text": "Hello, world.",
+  "lang": "en",
+  "speaker": "SPEAKER_00"
+}
+```
+
+#### error
+
+```json
+{
+  "type": "error",
+  "session_id": "2d5f4b0c-5f83-4b6e-9b6a-5e4d52f1b5c0",
+  "seq": 42,
+  "ts_ms": 1711800009999,
+  "message": "invalid-audio-format",
+  "detail": "expected pcm16le mono"
+}
+```
+
+### Realtime tuning knobs: window_size / overlap / emit_every
+
+The BFF supports per-session realtime ASR overrides passed as query parameters
+to `/ws/audio`.
+
+SDK-friendly names:
+
+- `window_size` (seconds) → maps to `rt_window_sec`
+- `overlap` (seconds) → maps to `rt_overlap_sec`
+- `emit_every` (seconds) → maps to `rt_emit_every_sec`
+
+Example:
+
+```
+/ws/audio?session_id=<uuid>&lang=en&sample_rate=16000&rt_window_sec=5.0&rt_overlap_sec=0.5&rt_emit_every_sec=0.7
+```
+
+Tradeoffs:
+
+- `window_size`:
+  - larger → more context / typically better stability, but higher latency
+  - smaller → lower latency, but less context (more unstable hypotheses)
+- `emit_every`:
+  - smaller → more frequent PARTIAL updates (more “live”), but more WS traffic
+  - larger → fewer updates, but UI feels less responsive
+- `overlap`:
+  - can reduce word-boundary errors between windows
+  - increases duplicated audio processing (more compute)
