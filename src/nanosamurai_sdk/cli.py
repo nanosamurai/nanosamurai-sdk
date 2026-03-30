@@ -92,6 +92,9 @@ async def _cmd_transcribe_wav(args: argparse.Namespace) -> int:
         pcm_frames=frames,
         lang=args.lang,
         sample_rate=args.sample_rate,
+        window_size=args.window_size,
+        overlap=args.overlap,
+        emit_every=args.emit_every,
     ):
         _print_json(event)
         if args.stop_on_final:
@@ -139,6 +142,24 @@ def main(argv: list[str] | None = None) -> None:
     p_wav.add_argument("path")
     p_wav.add_argument("--lang", default="")
     p_wav.add_argument("--sample-rate", type=int, default=16000)
+    p_wav.add_argument(
+        "--window-size",
+        type=float,
+        default=None,
+        help="Realtime ASR window size in seconds (maps to /ws/audio rt_window_sec)",
+    )
+    p_wav.add_argument(
+        "--overlap",
+        type=float,
+        default=None,
+        help="Realtime ASR window overlap in seconds (maps to /ws/audio rt_overlap_sec)",
+    )
+    p_wav.add_argument(
+        "--emit-every",
+        type=float,
+        default=None,
+        help="Emit PARTIAL ASR updates every N seconds (maps to /ws/audio rt_emit_every_sec)",
+    )
     p_wav.add_argument("--session-id", help="Use existing session id (default: create new)")
     p_wav.add_argument(
         "--stop-on-final",
