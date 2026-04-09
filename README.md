@@ -182,6 +182,16 @@ async def main() -> None:
         pcm_frames=frames,
         lang="en",  # or "de", etc.
         sample_rate=16000,
+        # Optional stream controls:
+        # realtime=True,
+        # refined=True,
+        # final=True,
+        # store_recording=True,
+        # refinement_window_sec=60.0,
+        # rt_partial_enable=True,
+        # rt_window_sec=5.0,
+        # rt_overlap_sec=0.5,
+        # rt_emit_every_sec=1.0,
     ):
         # evt is a dict, typically with keys: type, session_id, seq, ts_ms, ...
         print(evt)
@@ -219,7 +229,7 @@ Receives JSON text messages.
 2) **Audio** (client → server):
 
 ```
-GET /ws/audio?session_id=<uuid>&lang=<code>&sample_rate=16000
+GET /ws/audio?session_id=<uuid>&lang=<code>&sample_rate=16000[&...stream controls]
 ```
 
 Sends raw audio frames as **binary** messages:
@@ -340,31 +350,84 @@ Refined transcript segments (e.g. WhisperX) are pushed later over the same
 }
 ```
 
-### Realtime tuning knobs: window_size / overlap / emit_every
+### `/ws/audio` query parameters (stream controls)
 
-The BFF supports per-session realtime ASR overrides passed as query parameters
-to `/ws/audio`.
+`/ws/audio` accepts additional per-session controls via query parameters. These
+are used by the web UI and are also available to SDK users.
 
-SDK-friendly names:
+You should treat these settings as **fixed for the whole stream** (do not
+change them mid-connection).
 
-- `window_size` (seconds) → maps to `rt_window_sec`
-- `overlap` (seconds) → maps to `rt_overlap_sec`
-- `emit_every` (seconds) → maps to `rt_emit_every_sec`
+#### Overview
+
+| Parameter | Type | Default | Description |
+|---|---:|---:|---|
+| `session_id` | string (UUID) | required | Session id created via `POST /api/sessions`. |
+| `lang` | string | `""` | ISO-639-1 language code (`en`, `cs`, ...). Empty means auto-detect. |
+| `sample_rate` | int | `16000` | Input PCM sample rate (Hz). |
+| `realtime` | bool | `true` | Produce realtime transcript events (`type="asr"`) on `/ws/events`. |
+| `refined` | bool | `true` | Produce refined transcript events (`type="refined"`) on `/ws/events`. |
+| `final` | bool | `true` | Produce final transcript artifacts for the session. |
+| `store_recording` | bool | `true` | Keep the recording for later playback/download. Only relevant when `final=true`. |
+| `refinement_window_sec` | float | server default | Tuning for refined transcript production. |
+| `rt_partial_enable` | bool | server default | If `false`, realtime PARTIAL hypotheses are suppressed (FINALs still emit). |
+| `rt_window_sec` | float | server default | Realtime ASR window size in seconds. |
+| `rt_overlap_sec` | float | server default | Realtime ASR overlap in seconds. |
+| `rt_emit_every_sec` | float | server default | Emit PARTIAL realtime updates every N seconds. |
+
+Notes on defaults:
+- When you **omit** an optional parameter, the server applies its default.
+- For output selection (`realtime/refined/final`), the current server behavior
+  defaults each to **`true`** when omitted.
+
+#### Output selection: `realtime` / `refined` / `final`
+
+These booleans control which transcript “layers” are produced for the stream.
+
+Example (realtime only):
+
+```
+/ws/audio?session_id=<uuid>&lang=en&sample_rate=16000&realtime=true&refined=false&final=false
+```
+
+#### Recording retention: `store_recording`
+
+Controls whether the session’s recording is retained for later playback / WAV
+download.
+
+```
+/ws/audio?session_id=<uuid>&store_recording=false
+```
+
+#### Refinement tuning: `refinement_window_sec`
+
+Optional refinement tuning knob.
+
+```
+/ws/audio?session_id=<uuid>&refinement_window_sec=60
+```
+
+#### Realtime tuning: `rt_partial_enable` / `rt_window_sec` / `rt_overlap_sec` / `rt_emit_every_sec`
+
+These parameters tune realtime ASR behavior.
 
 Example:
 
 ```
-/ws/audio?session_id=<uuid>&lang=en&sample_rate=16000&rt_window_sec=5.0&rt_overlap_sec=0.5&rt_emit_every_sec=0.7
+/ws/audio?session_id=<uuid>&lang=en&sample_rate=16000&rt_partial_enable=true&rt_window_sec=5.0&rt_overlap_sec=0.5&rt_emit_every_sec=1.0
 ```
+
+Note: `rt_emit_every_sec` may have a server-side minimum (to avoid excessive
+update frequency).
 
 Tradeoffs:
 
-- `window_size`:
+- `rt_window_sec`:
   - larger → more context / typically better stability, but higher latency
   - smaller → lower latency, but less context (more unstable hypotheses)
-- `emit_every`:
+- `rt_emit_every_sec`:
   - smaller → more frequent PARTIAL updates (more “live”), but more WS traffic
   - larger → fewer updates, but UI feels less responsive
-- `overlap`:
+- `rt_overlap_sec`:
   - can reduce word-boundary errors between windows
   - increases duplicated audio processing (more compute)
