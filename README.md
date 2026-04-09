@@ -120,6 +120,29 @@ nanosamurai recordings audio <session_id> --out out.wav
 nanosamurai transcribe wav path/to/audio.wav --lang en --sample-rate 16000
 ```
 
+Examples using stream controls:
+
+Realtime-only (disable refined + final outputs):
+
+```bash
+nanosamurai transcribe wav path/to/audio.wav \
+  --lang en \
+  --sample-rate 16000 \
+  --realtime true \
+  --refined false \
+  --final false
+```
+
+Disable recording retention (keep final transcript, but do not keep audio for playback/download):
+
+```bash
+nanosamurai transcribe wav path/to/audio.wav \
+  --lang en \
+  --sample-rate 16000 \
+  --final true \
+  --store-recording false
+```
+
 Notes:
 - for MVP, the CLI validates the WAV is **mono 16-bit PCM @ 16kHz**.
 - the BFF expects PCM16LE frames on `/ws/audio`.
