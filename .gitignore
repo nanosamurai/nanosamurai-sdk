@@ -21,3 +21,8 @@ err.log
 transcribe_*.log
 transcribe_*.txt
 transcribe_*.jsonl
+
+# tmp local media artifacts
+tmp/*.wav
+tmp/*.mp4
+tmp/*.jsonl

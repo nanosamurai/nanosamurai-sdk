@@ -364,6 +364,14 @@ class NanosamuraiClient:
         pcm_frames: Iterable[bytes],
         lang: str = "",
         sample_rate: int = 16000,
+        # Stream controls (/ws/audio query params)
+        realtime: bool | None = None,
+        refined: bool | None = None,
+        final: bool | None = None,
+        store_recording: bool | None = None,
+        refinement_window_sec: float | None = None,
+        # Realtime tuning (/ws/audio query params)
+        rt_partial_enable: bool | None = None,
         window_size: float | None = None,
         overlap: float | None = None,
         emit_every: float | None = None,
@@ -375,6 +383,19 @@ class NanosamuraiClient:
             pcm_frames: Iterable of PCM16LE byte chunks.
             lang: Language code ("en", "cs", "")
             sample_rate: Sample rate (default 16000)
+            realtime: Whether to run realtime transcription.
+                Maps to `/ws/audio` query param `realtime`.
+                If omitted, the server default applies.
+            refined: Whether to run the refinement pipeline.
+                Maps to `/ws/audio` query param `refined`.
+            final: Whether to produce final transcript artifacts.
+                Maps to `/ws/audio` query param `final`.
+            store_recording: Whether to keep the recording for later playback.
+                Maps to `/ws/audio` query param `store_recording`.
+            refinement_window_sec: Optional refinement window size.
+                Maps to `/ws/audio` query param `refinement_window_sec`.
+            rt_partial_enable: Whether realtime ASR should emit PARTIAL hypotheses.
+                Maps to `/ws/audio` query param `rt_partial_enable`.
             window_size: Optional realtime ASR window size in seconds.
                 Mapped to the BFF's `/ws/audio` query param `rt_window_sec`.
             overlap: Optional realtime ASR overlap in seconds.
@@ -397,6 +418,26 @@ class NanosamuraiClient:
             "lang": lang,
             "sample_rate": sample_rate,
         }
+
+        def _bool_q(v: bool) -> str:
+            # Be explicit: urlencode() would otherwise produce Python's `True`/`False`.
+            return "true" if v else "false"
+
+        # Stream controls
+        if realtime is not None:
+            audio_q["realtime"] = _bool_q(bool(realtime))
+        if refined is not None:
+            audio_q["refined"] = _bool_q(bool(refined))
+        if final is not None:
+            audio_q["final"] = _bool_q(bool(final))
+        if store_recording is not None:
+            audio_q["store_recording"] = _bool_q(bool(store_recording))
+        if refinement_window_sec is not None:
+            audio_q["refinement_window_sec"] = float(refinement_window_sec)
+
+        # Realtime tuning
+        if rt_partial_enable is not None:
+            audio_q["rt_partial_enable"] = _bool_q(bool(rt_partial_enable))
         if window_size is not None:
             audio_q["rt_window_sec"] = float(window_size)
         if overlap is not None:
