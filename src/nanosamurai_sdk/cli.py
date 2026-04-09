@@ -29,6 +29,25 @@ from .client import NanosamuraiClient
 from .errors import NanosamuraiError
 
 
+def _parse_bool_or_none(v: str | None) -> bool | None:
+    """Parse a tri-state boolean flag.
+
+    - None or empty => None (omit from request, let server defaults apply)
+    - "true"/"false" (case-insensitive) => bool
+    """
+
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if not s:
+        return None
+    if s in ("true", "1", "yes", "on"):
+        return True
+    if s in ("false", "0", "no", "off"):
+        return False
+    raise SystemExit(f"Invalid boolean value: {v!r} (expected true|false)")
+
+
 def _env(name: str) -> str | None:
     v = os.environ.get(name)
     if v is None:
@@ -92,6 +111,12 @@ async def _cmd_transcribe_wav(args: argparse.Namespace) -> int:
         pcm_frames=frames,
         lang=args.lang,
         sample_rate=args.sample_rate,
+        realtime=_parse_bool_or_none(args.realtime),
+        refined=_parse_bool_or_none(args.refined),
+        final=_parse_bool_or_none(args.final),
+        store_recording=_parse_bool_or_none(args.store_recording),
+        refinement_window_sec=args.refinement_window_sec,
+        rt_partial_enable=_parse_bool_or_none(args.rt_partial_enable),
         window_size=args.window_size,
         overlap=args.overlap,
         emit_every=args.emit_every,
@@ -142,6 +167,34 @@ def main(argv: list[str] | None = None) -> None:
     p_wav.add_argument("path")
     p_wav.add_argument("--lang", default="")
     p_wav.add_argument("--sample-rate", type=int, default=16000)
+
+    # Stream controls
+    p_wav.add_argument(
+        "--realtime",
+        default=None,
+        help="Enable realtime transcript output (true|false). Omit to use server default.",
+    )
+    p_wav.add_argument(
+        "--refined",
+        default=None,
+        help="Enable refined transcript output (true|false). Omit to use server default.",
+    )
+    p_wav.add_argument(
+        "--final",
+        default=None,
+        help="Enable final transcript output (true|false). Omit to use server default.",
+    )
+    p_wav.add_argument(
+        "--store-recording",
+        default=None,
+        help="Keep the recording for later playback (true|false). Omit to use server default.",
+    )
+    p_wav.add_argument(
+        "--refinement-window-sec",
+        type=float,
+        default=None,
+        help="Refinement window size in seconds (maps to /ws/audio refinement_window_sec)",
+    )
     p_wav.add_argument(
         "--window-size",
         type=float,
@@ -159,6 +212,11 @@ def main(argv: list[str] | None = None) -> None:
         type=float,
         default=None,
         help="Emit PARTIAL ASR updates every N seconds (maps to /ws/audio rt_emit_every_sec)",
+    )
+    p_wav.add_argument(
+        "--rt-partial-enable",
+        default=None,
+        help="Whether realtime ASR should emit PARTIAL hypotheses (true|false). Omit to use server default.",
     )
     p_wav.add_argument("--session-id", help="Use existing session id (default: create new)")
     p_wav.add_argument(
