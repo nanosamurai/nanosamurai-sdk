@@ -167,6 +167,57 @@ items = client.list_recordings(limit=10, offset=0)
 print("recordings", len(items))
 ```
 
+### REST: list workflows and webhooks
+
+```python
+import os
+from nanosamurai_sdk import NanosamuraiClient
+
+
+client = NanosamuraiClient(
+    api_url=os.environ["NANOSAMURAI_API_URL"],
+    issuer=os.environ["NANOSAMURAI_ISSUER"],
+    client_id=os.environ["NANOSAMURAI_CLIENT_ID"],
+    client_secret=os.environ["NANOSAMURAI_CLIENT_SECRET"],
+)
+
+workflows = client.list_workflows()
+webhooks = client.list_webhooks()
+
+print("workflows", len(workflows.get("items", [])))
+print("webhooks", len(webhooks.get("items", [])))
+```
+
+### REST: create session with workflow/webhook overrides
+
+```python
+import os
+from nanosamurai_sdk import NanosamuraiClient
+
+
+client = NanosamuraiClient(
+    api_url=os.environ["NANOSAMURAI_API_URL"],
+    issuer=os.environ["NANOSAMURAI_ISSUER"],
+    client_id=os.environ["NANOSAMURAI_CLIENT_ID"],
+    client_secret=os.environ["NANOSAMURAI_CLIENT_SECRET"],
+)
+
+session_id = client.create_session(
+    title="My session",
+    webhook_overrides={
+        "use_defaults": True,
+        "webhook_ids": ["<uuid>"],
+        "disable_event_types": ["transcript.refined.segment"],
+    },
+    workflow_overrides={
+        "use_defaults": True,
+        "workflow_ids": ["<uuid>"],
+    },
+)
+
+print("session_id", session_id)
+```
+
 ### WebSockets: transcribe a WAV file (stream audio + receive events)
 
 The BFF expects **PCM16LE mono @ 16kHz** frames sent as **binary** messages to
@@ -277,7 +328,7 @@ Then connect `/ws/events` and `/ws/audio` with that `session_id`.
 
 All events share these common fields:
 
-- `type`: one of `status`, `error`, `asr`, `refined`
+- `type`: one of `status`, `error`, `asr`, `refined`, `workflow_result`
 - `session_id`: the session UUID
 - `seq`: monotonic per-session sequence number
 - `ts_ms`: event timestamp (epoch milliseconds)
@@ -371,6 +422,34 @@ Refined transcript segments (e.g. WhisperX) are pushed later over the same
   "message": "invalid-audio-format",
   "detail": "expected pcm16le mono"
 }
+```
+
+#### workflow_result
+
+Workflow results are streamed to `/ws/events` when workflow-runner produces a
+result for the current session. (These are also persisted and later visible via
+`GET /api/recordings/:session_id` under `workflow_results_latest`.)
+
+Example:
+
+```json
+{
+  "type": "workflow_result",
+  "session_id": "2d5f4b0c-5f83-4b6e-9b6a-5e4d52f1b5c0",
+  "seq": 300,
+  "ts_ms": 1711800123999,
+  "workflow_id": "11111111-1111-1111-1111-111111111111",
+  "workflow_name": "Summarize",
+  "status": "succeeded",
+  "render_markdown": "# Summary\n..."
+}
+```
+
+The SDK provides a convenience filter:
+
+```python
+async for ev in client.iter_workflow_results(session_id=session_id):
+    print(ev["workflow_id"], ev.get("status"))
 ```
 
 ### `/ws/audio` query parameters (stream controls)
