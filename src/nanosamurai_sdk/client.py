@@ -3,6 +3,7 @@
 This client covers the endpoints that make sense for 3rd parties:
 
 - REST:
+  - GET /api/me
   - POST /api/sessions (supports workflow/webhook overrides)
   - PATCH /api/sessions/:session_id
   - GET /api/recordings
@@ -10,6 +11,8 @@ This client covers the endpoints that make sense for 3rd parties:
   - GET /api/recordings/:session_id/audio
   - DELETE /api/recordings/:session_id
   - GET /api/sessions/:session_id/webhook-delivery-outcomes
+  - Speakers: /api/speakers, /api/speaker-enrollment/from-recording
+  - API credentials: /api/api-credentials
   - Webhooks: /api/webhooks (+ defaults)
   - Workflows: /api/workflows (+ defaults)
 
@@ -290,6 +293,104 @@ class NanosamuraiClient:
                 )
             )
         return out
+
+    # -----------------
+    # Misc / discovery
+    # -----------------
+
+    def me(self) -> dict[str, Any]:
+        """Return information about the current authenticated principal.
+
+        Calls: GET /api/me
+
+        Returns:
+            Parsed JSON response body.
+        """
+
+        return self._rest_json("GET", "/api/me")
+
+    # -----------------
+    # Speakers (tenant-scoped)
+    # -----------------
+
+    def list_speakers(self) -> dict[str, Any]:
+        """List enrolled speakers.
+
+        Calls: GET /api/speakers
+        """
+
+        return self._rest_json("GET", "/api/speakers")
+
+    def delete_speaker(self, speaker_id: str) -> dict[str, Any]:
+        """Delete an enrolled speaker.
+
+        Calls: DELETE /api/speakers/:speaker_id
+        """
+
+        return self._rest_json("DELETE", f"/api/speakers/{speaker_id}")
+
+    def create_speaker_from_recording(
+        self,
+        *,
+        session_id: str,
+        start_s: float,
+        end_s: float,
+        label: str,
+    ) -> dict[str, Any]:
+        """Enroll a new speaker by clipping a sample from a stored recording.
+
+        Calls: POST /api/speaker-enrollment/from-recording
+
+        Inputs:
+            session_id: Session UUID.
+            start_s/end_s: Clip window in seconds.
+            label: Speaker label.
+        """
+
+        payload = {"session_id": session_id, "start_s": float(start_s), "end_s": float(end_s), "label": label}
+        return self._rest_json("POST", "/api/speaker-enrollment/from-recording", json_body=payload)
+
+    # -----------------
+    # API credentials (tenant-scoped)
+    # -----------------
+
+    def list_api_credentials(self) -> dict[str, Any]:
+        """List tenant API credentials.
+
+        Calls: GET /api/api-credentials
+        """
+
+        return self._rest_json("GET", "/api/api-credentials")
+
+    def create_api_credential(self, *, name: str) -> dict[str, Any]:
+        """Create a new API credential.
+
+        Calls: POST /api/api-credentials
+
+        Returns:
+            Parsed JSON including `client_secret` (returned only once).
+        """
+
+        return self._rest_json("POST", "/api/api-credentials", json_body={"name": name})
+
+    def rotate_api_credential(self, credential_id: str) -> dict[str, Any]:
+        """Rotate an API credential secret.
+
+        Calls: POST /api/api-credentials/:id/rotate
+
+        Returns:
+            Parsed JSON including new `client_secret` (returned only once).
+        """
+
+        return self._rest_json("POST", f"/api/api-credentials/{credential_id}/rotate")
+
+    def revoke_api_credential(self, credential_id: str) -> dict[str, Any]:
+        """Revoke an API credential.
+
+        Calls: DELETE /api/api-credentials/:id
+        """
+
+        return self._rest_json("DELETE", f"/api/api-credentials/{credential_id}")
 
     # -----------------
     # Webhooks (tenant-scoped)
