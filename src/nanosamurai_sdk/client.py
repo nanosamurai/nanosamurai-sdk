@@ -3,10 +3,18 @@
 This client covers the endpoints that make sense for 3rd parties:
 
 - REST:
-  - POST /api/sessions
+  - GET /api/me
+  - POST /api/sessions (supports workflow/webhook overrides)
+  - PATCH /api/sessions/:session_id
   - GET /api/recordings
   - GET /api/recordings/:session_id
   - GET /api/recordings/:session_id/audio
+  - DELETE /api/recordings/:session_id
+  - GET /api/sessions/:session_id/webhook-delivery-outcomes
+  - Speakers: /api/speakers, /api/speaker-enrollment/from-recording
+  - API credentials: /api/api-credentials
+  - Webhooks: /api/webhooks (+ defaults)
+  - Workflows: /api/workflows (+ defaults)
 
 - WebSockets:
   - /ws/events (JSON text messages)
@@ -113,18 +121,95 @@ class NanosamuraiClient:
     def _rest_url(self, path: str) -> str:
         return urljoin(self._api_url, path.lstrip("/"))
 
-    def create_session(self) -> str:
+    def _rest_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Call a REST endpoint and return a parsed JSON object.
+
+        Inputs:
+            method: HTTP method (GET/POST/PUT/PATCH/DELETE)
+            path: Absolute path (e.g. "/api/workflows")
+            json_body: Optional JSON body dict.
+            params: Optional query parameters.
+
+        Returns:
+            Parsed JSON object as a dict.
+
+        Raises:
+            ApiError on non-2xx or invalid JSON object response.
+        """
+
+        url = self._rest_url(path)
+        with httpx.Client(timeout=self._timeout_s) as client:
+            resp = client.request(
+                method.upper(),
+                url,
+                headers=self._authz_headers(),
+                json=json_body,
+                params=params,
+            )
+        if resp.status_code // 100 != 2:
+            raise ApiError(
+                f"REST call failed: {method.upper()} {path}",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ApiError(
+                f"Invalid JSON response from: {method.upper()} {path}",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        return data
+
+    def create_session(
+        self,
+        *,
+        title: str | None = None,
+        session_settings: dict[str, Any] | None = None,
+        webhook_overrides: dict[str, Any] | None = None,
+        workflow_overrides: dict[str, Any] | None = None,
+    ) -> str:
         """Create a new session id.
 
         Calls: POST /api/sessions
 
+        Inputs:
+            title: Optional session title.
+            session_settings: Optional nested settings map.
+                This is intentionally a free-form JSON object on the API side.
+            webhook_overrides: Optional session-scoped webhook routing overrides.
+                Shape matches BFF `CreateSessionRequest.webhook_overrides`.
+            workflow_overrides: Optional session-scoped workflow overrides.
+                Shape matches BFF `CreateSessionRequest.workflow_overrides`.
+
         Returns:
             session_id (UUID string)
+
+        Notes:
+            We always send a JSON body (at least `{}`) so this stays compatible
+            with server-side request coercion.
         """
+
+        payload: dict[str, Any] = {}
+        if title is not None:
+            payload["title"] = title
+        if session_settings is not None:
+            payload["session_settings"] = session_settings
+        if webhook_overrides is not None:
+            payload["webhook_overrides"] = webhook_overrides
+        if workflow_overrides is not None:
+            payload["workflow_overrides"] = workflow_overrides
 
         url = self._rest_url("/api/sessions")
         with httpx.Client(timeout=self._timeout_s) as client:
-            resp = client.post(url, headers=self._authz_headers())
+            resp = client.post(url, headers=self._authz_headers(), json=payload)
         if resp.status_code // 100 != 2:
             raise ApiError(
                 "Failed to create session",
@@ -136,6 +221,29 @@ class NanosamuraiClient:
         if not isinstance(sid, str) or not sid:
             raise ApiError("Invalid response from /api/sessions", status_code=resp.status_code, body=resp.text)
         return sid
+
+    def rename_session(self, session_id: str, *, title: str | None) -> dict[str, Any]:
+        """Rename a session.
+
+        Calls: PATCH /api/sessions/:session_id
+
+        Inputs:
+            session_id: Session UUID.
+            title: New title (may be None/blank; server normalizes blanks).
+
+        Returns:
+            Parsed JSON response body.
+        """
+
+        url = self._rest_url(f"/api/sessions/{session_id}")
+        with httpx.Client(timeout=self._timeout_s) as client:
+            resp = client.patch(url, headers=self._authz_headers(), json={"title": title})
+        if resp.status_code // 100 != 2:
+            raise ApiError("Failed to rename session", status_code=resp.status_code, body=resp.text)
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ApiError("Invalid response from /api/sessions/:id", status_code=resp.status_code, body=resp.text)
+        return data
 
     def list_recordings(self, *, limit: int = 200, offset: int = 0) -> list[RecordingItem]:
         """List recordings/sessions for the authenticated tenant.
@@ -186,6 +294,236 @@ class NanosamuraiClient:
             )
         return out
 
+    # -----------------
+    # Misc / discovery
+    # -----------------
+
+    def me(self) -> dict[str, Any]:
+        """Return information about the current authenticated principal.
+
+        Calls: GET /api/me
+
+        Returns:
+            Parsed JSON response body.
+        """
+
+        return self._rest_json("GET", "/api/me")
+
+    # -----------------
+    # Speakers (tenant-scoped)
+    # -----------------
+
+    def list_speakers(self) -> dict[str, Any]:
+        """List enrolled speakers.
+
+        Calls: GET /api/speakers
+        """
+
+        return self._rest_json("GET", "/api/speakers")
+
+    def delete_speaker(self, speaker_id: str) -> dict[str, Any]:
+        """Delete an enrolled speaker.
+
+        Calls: DELETE /api/speakers/:speaker_id
+        """
+
+        return self._rest_json("DELETE", f"/api/speakers/{speaker_id}")
+
+    def create_speaker_from_recording(
+        self,
+        *,
+        session_id: str,
+        start_s: float,
+        end_s: float,
+        label: str,
+    ) -> dict[str, Any]:
+        """Enroll a new speaker by clipping a sample from a stored recording.
+
+        Calls: POST /api/speaker-enrollment/from-recording
+
+        Inputs:
+            session_id: Session UUID.
+            start_s/end_s: Clip window in seconds.
+            label: Speaker label.
+        """
+
+        payload = {"session_id": session_id, "start_s": float(start_s), "end_s": float(end_s), "label": label}
+        return self._rest_json("POST", "/api/speaker-enrollment/from-recording", json_body=payload)
+
+    # -----------------
+    # API credentials (tenant-scoped)
+    # -----------------
+
+    def list_api_credentials(self) -> dict[str, Any]:
+        """List tenant API credentials.
+
+        Calls: GET /api/api-credentials
+        """
+
+        return self._rest_json("GET", "/api/api-credentials")
+
+    def create_api_credential(self, *, name: str) -> dict[str, Any]:
+        """Create a new API credential.
+
+        Calls: POST /api/api-credentials
+
+        Returns:
+            Parsed JSON including `client_secret` (returned only once).
+        """
+
+        return self._rest_json("POST", "/api/api-credentials", json_body={"name": name})
+
+    def rotate_api_credential(self, credential_id: str) -> dict[str, Any]:
+        """Rotate an API credential secret.
+
+        Calls: POST /api/api-credentials/:id/rotate
+
+        Returns:
+            Parsed JSON including new `client_secret` (returned only once).
+        """
+
+        return self._rest_json("POST", f"/api/api-credentials/{credential_id}/rotate")
+
+    def revoke_api_credential(self, credential_id: str) -> dict[str, Any]:
+        """Revoke an API credential.
+
+        Calls: DELETE /api/api-credentials/:id
+        """
+
+        return self._rest_json("DELETE", f"/api/api-credentials/{credential_id}")
+
+    # -----------------
+    # Webhooks (tenant-scoped)
+    # -----------------
+
+    def list_webhooks(self) -> dict[str, Any]:
+        """List tenant webhooks.
+
+        Calls: GET /api/webhooks
+        """
+
+        return self._rest_json("GET", "/api/webhooks")
+
+    def create_webhook(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a webhook.
+
+        Calls: POST /api/webhooks
+
+        Inputs:
+            payload: JSON payload per BFF CreateWebhookRequest.
+        """
+
+        if not isinstance(payload, dict):
+            raise TypeError("payload must be a dict")
+        return self._rest_json("POST", "/api/webhooks", json_body=payload)
+
+    def update_webhook(self, webhook_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        """Update a webhook.
+
+        Calls: PUT /api/webhooks/:id
+
+        Inputs:
+            webhook_id: Webhook UUID string.
+            patch: JSON patch per BFF UpdateWebhookRequest.
+        """
+
+        if not isinstance(patch, dict):
+            raise TypeError("patch must be a dict")
+        return self._rest_json("PUT", f"/api/webhooks/{webhook_id}", json_body=patch)
+
+    def delete_webhook(self, webhook_id: str) -> dict[str, Any]:
+        """Delete a webhook.
+
+        Calls: DELETE /api/webhooks/:id
+        """
+
+        return self._rest_json("DELETE", f"/api/webhooks/{webhook_id}")
+
+    def get_webhook_defaults(self) -> dict[str, Any]:
+        """Get tenant webhook defaults.
+
+        Calls: GET /api/webhooks/defaults
+        """
+
+        return self._rest_json("GET", "/api/webhooks/defaults")
+
+    def set_webhook_defaults(self, webhook_ids: list[str]) -> dict[str, Any]:
+        """Set tenant webhook defaults.
+
+        Calls: PUT /api/webhooks/defaults
+
+        Inputs:
+            webhook_ids: List of webhook UUID strings.
+        """
+
+        return self._rest_json("PUT", "/api/webhooks/defaults", json_body={"webhook_ids": webhook_ids})
+
+    # -----------------
+    # Workflows (tenant-scoped)
+    # -----------------
+
+    def list_workflows(self) -> dict[str, Any]:
+        """List tenant workflows.
+
+        Calls: GET /api/workflows
+        """
+
+        return self._rest_json("GET", "/api/workflows")
+
+    def create_workflow(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a workflow.
+
+        Calls: POST /api/workflows
+
+        Inputs:
+            payload: JSON payload per BFF CreateWorkflowRequest.
+        """
+
+        if not isinstance(payload, dict):
+            raise TypeError("payload must be a dict")
+        return self._rest_json("POST", "/api/workflows", json_body=payload)
+
+    def update_workflow(self, workflow_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        """Update a workflow.
+
+        Calls: PUT /api/workflows/:id
+
+        Inputs:
+            workflow_id: Workflow UUID string.
+            patch: JSON patch per BFF UpdateWorkflowRequest.
+        """
+
+        if not isinstance(patch, dict):
+            raise TypeError("patch must be a dict")
+        return self._rest_json("PUT", f"/api/workflows/{workflow_id}", json_body=patch)
+
+    def delete_workflow(self, workflow_id: str) -> dict[str, Any]:
+        """Delete a workflow.
+
+        Calls: DELETE /api/workflows/:id
+        """
+
+        return self._rest_json("DELETE", f"/api/workflows/{workflow_id}")
+
+    def get_workflow_defaults(self) -> dict[str, Any]:
+        """Get tenant workflow defaults.
+
+        Calls: GET /api/workflows/defaults
+        """
+
+        return self._rest_json("GET", "/api/workflows/defaults")
+
+    def set_workflow_defaults(self, workflow_ids: list[str]) -> dict[str, Any]:
+        """Set tenant workflow defaults.
+
+        Calls: PUT /api/workflows/defaults
+
+        Inputs:
+            workflow_ids: List of workflow UUID strings.
+        """
+
+        return self._rest_json("PUT", "/api/workflows/defaults", json_body={"workflow_ids": workflow_ids})
+
     def get_recording(self, session_id: str) -> dict[str, Any]:
         """Fetch recording detail, including transcripts.
 
@@ -201,6 +539,56 @@ class NanosamuraiClient:
         if resp.status_code // 100 != 2:
             raise ApiError("Failed to fetch recording", status_code=resp.status_code, body=resp.text)
         return resp.json()
+
+    def delete_recording(self, session_id: str) -> dict[str, Any]:
+        """Delete a recording (session) for the current tenant.
+
+        Calls: DELETE /api/recordings/:session_id
+
+        Returns:
+            Parsed JSON response body.
+        """
+
+        url = self._rest_url(f"/api/recordings/{session_id}")
+        with httpx.Client(timeout=self._timeout_s) as client:
+            resp = client.delete(url, headers=self._authz_headers())
+        if resp.status_code // 100 != 2:
+            raise ApiError("Failed to delete recording", status_code=resp.status_code, body=resp.text)
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ApiError(
+                "Invalid response from /api/recordings/:session_id (DELETE)",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        return data
+
+    def list_webhook_delivery_outcomes(self, session_id: str) -> dict[str, Any]:
+        """List latest webhook delivery outcomes for a session.
+
+        Calls: GET /api/sessions/:session_id/webhook-delivery-outcomes
+
+        Returns:
+            Parsed JSON response body.
+        """
+
+        url = self._rest_url(f"/api/sessions/{session_id}/webhook-delivery-outcomes")
+        with httpx.Client(timeout=self._timeout_s) as client:
+            resp = client.get(url, headers=self._authz_headers())
+        if resp.status_code // 100 != 2:
+            raise ApiError(
+                "Failed to list webhook delivery outcomes",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ApiError(
+                "Invalid response from /api/sessions/:id/webhook-delivery-outcomes",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        return data
 
     def get_recording_audio_bytes(
         self,
@@ -356,6 +744,29 @@ class NanosamuraiClient:
                     yield data
         finally:
             await ws.close()
+
+    async def iter_workflow_results(
+        self,
+        *,
+        session_id: str,
+        workflow_id: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield only workflow result events from `/ws/events`.
+
+        Inputs:
+            session_id: Session UUID.
+            workflow_id: Optional workflow UUID to filter by.
+
+        Yields:
+            Event dicts with `type == "workflow_result"`.
+        """
+
+        async for evt in self.iter_events(session_id=session_id):
+            if evt.get("type") != "workflow_result":
+                continue
+            if workflow_id is not None and str(evt.get("workflow_id")) != str(workflow_id):
+                continue
+            yield evt
 
     async def transcribe_pcm(
         self,
