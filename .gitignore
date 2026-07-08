@@ -8,6 +8,7 @@ __pycache__/
 
 # Packaging artifacts
 *.egg-info/
+src/*.egg-info/
 dist/
 build/
 
