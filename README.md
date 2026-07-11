@@ -59,12 +59,28 @@ python -m pip install -e ".[dev]"
 pip install nanosamurai-sdk
 ```
 
-## Environment variables
+## Endpoint configuration
+
+The SDK is self-hosting friendly. Hosted nanosamur.ai URLs are examples only;
+set these values to your own deployment when running locally or on-prem.
+
+CLI flags:
+
+```bash
+nanosamurai \
+  --api-url http://127.0.0.1:8000 \
+  --issuer http://127.0.0.1:8080/realms/nanosamurai \
+  --client-id "$NANOSAMURAI_CLIENT_ID" \
+  --client-secret "$NANOSAMURAI_CLIENT_SECRET" \
+  recordings list
+```
+
+Environment variables:
 
 The CLI (and examples) read configuration from:
 
-- `NANOSAMURAI_API_URL` – base URL of samuraibff (e.g. `https://platform.nanosamur.ai`)
-- `NANOSAMURAI_ISSUER` – nanosamurai realm issuer (e.g. `https://auth.nanosamur.ai/realms/nanosamurai`)
+- `NANOSAMURAI_API_URL` – base URL of samuraibff, e.g. `http://127.0.0.1:8000` or `https://platform.nanosamur.ai`
+- `NANOSAMURAI_ISSUER` – OIDC realm issuer, e.g. `http://127.0.0.1:8080/realms/nanosamurai` or `https://auth.nanosamur.ai/realms/nanosamurai`
 - `NANOSAMURAI_CLIENT_ID`
 - `NANOSAMURAI_CLIENT_SECRET`
 
