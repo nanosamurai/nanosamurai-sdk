@@ -53,11 +53,17 @@ Then install:
 python -m pip install -e ".[dev]"
 ```
 
-## Install (normal)
+## Install from a reviewed Git revision
+
+The SDK is not published to PyPI yet. Install it from the audited commit pinned
+below:
 
 ```bash
-pip install nanosamurai-sdk
+python -m pip install "git+https://github.com/nanosamurai/nanosamurai-sdk.git@ec5797be2364837e7c7e9dd17644fde60fa7c61a"
 ```
+
+Pin deployments to a reviewed commit or release tag rather than a mutable
+branch. Do not install similarly named packages from PyPI.
 
 ## Endpoint configuration
 
