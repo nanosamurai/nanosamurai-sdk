@@ -35,6 +35,10 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "live: opt-in test that uploads explicitly authorized audio to a real deployment",
+]
 
 [tool.ruff]
 line-length = 100
