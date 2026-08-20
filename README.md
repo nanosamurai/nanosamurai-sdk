@@ -240,6 +240,16 @@ session_id = client.create_session(
 print("session_id", session_id)
 ```
 
+When audio capture ends, explicitly close the BFF session state machine:
+
+```python
+client.finish_session(session_id)
+```
+
+The SDK also supports both speaker-enrollment routes. Upload a WAV sample with
+`client.create_speaker(label="Alice", sample_path="alice.wav")`, or enroll from
+a stored recording with `client.create_speaker_from_recording(...)`.
+
 ### WebSockets: transcribe a WAV file (stream audio + receive events)
 
 The BFF expects **PCM16LE mono @ 16kHz** frames sent as **binary** messages to
@@ -273,7 +283,7 @@ async def main() -> None:
         frame_bytes=3200,  # 100ms @ 16kHz mono PCM16
     )
 
-    async for evt in client.transcribe_pcm(
+    detail = await client.transcribe_pcm_until_complete(
         session_id=session_id,
         pcm_frames=frames,
         lang="en",  # or "de", etc.
@@ -285,19 +295,12 @@ async def main() -> None:
         # store_recording=True,
         # refinement_window_sec=60.0,
         # rt_partial_enable=True,
-        # rt_window_sec=5.0,
-        # rt_overlap_sec=0.5,
-        # rt_emit_every_sec=1.0,
-    ):
-        # evt is a dict, typically with keys: type, session_id, seq, ts_ms, ...
-        print(evt)
-
-        # optional: stop on first final ASR message.
-        # NOTE: the realtime ASR service emits multiple PARTIAL events and then
-        # a FINAL event *per window*; this will therefore usually stop before
-        # the whole audio is fully transcribed.
-        if evt.get("type") in ("refined", "asr") and evt.get("final") is True:
-            break
+        # window_size=5.0,
+        # overlap=0.5,
+        # emit_every=1.0,
+        on_event=print,
+    )
+    print("persisted", detail["session"]["status"])
 
 
 if __name__ == "__main__":
@@ -305,6 +308,12 @@ if __name__ == "__main__":
 ```
 
 ## WebSockets API (realtime ASR)
+
+`transcribe_pcm_until_complete()` is intended for finite recordings. It closes
+the event stream after post-audio inactivity, explicitly finishes the session,
+and waits for the persisted final transcript. Use the lower-level
+`transcribe_pcm()` iterator for open-ended/live capture and close or cancel that
+iterator when capture stops.
 
 The REST API is documented in Swagger (`/docs`) but WebSockets are currently not
 modeled in the OpenAPI spec. This section documents the realtime ASR WS
@@ -555,3 +564,34 @@ Tradeoffs:
 - `rt_overlap_sec`:
   - can reduce word-boundary errors between windows
   - increases duplicated audio processing (more compute)
+
+## Testing
+
+The default suite is fully local and does not contact a deployment:
+
+```bash
+pytest -q
+ruff check .
+```
+
+An opt-in live test covers OIDC client credentials, session creation, audio and
+event WebSockets, realtime ASR, explicit session finish, persisted refined and
+final transcripts, recording download, and read-only workflow/webhook APIs.
+It requires a mono 16-bit PCM 16kHz WAV file:
+
+```bash
+NANOSAMURAI_RUN_LIVE_TESTS=1 \
+NANOSAMURAI_TEST_WAV=path/to/non-sensitive-synthetic.wav \
+pytest -q -m live tests/integration/test_live_transcription.py
+```
+
+The four standard `NANOSAMURAI_API_URL`, `NANOSAMURAI_ISSUER`,
+`NANOSAMURAI_CLIENT_ID`, and `NANOSAMURAI_CLIENT_SECRET` variables must also be
+set. The explicit `NANOSAMURAI_RUN_LIVE_TESTS=1` gate prevents accidental audio
+uploads. Use only synthetic or otherwise approved test audio. The test deletes
+the session and recording it creates in a `finally` block.
+
+The deployed BFF currently returns HTTP 500 from `/api/me` for M2M principals
+whose Keycloak `email` claim is null because its response schema treats the
+optional field as non-nullable. The SDK intentionally reports that response as
+`ApiError`; correcting it requires a BFF schema fix.
