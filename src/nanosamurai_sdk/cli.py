@@ -106,25 +106,41 @@ async def _cmd_transcribe_wav(args: argparse.Namespace) -> int:
     session_id = args.session_id or client.create_session()
     frames = wav_to_pcm_frames(args.path, expected_sample_rate=args.sample_rate)
 
-    async for event in client.transcribe_pcm(
-        session_id=session_id,
-        pcm_frames=frames,
-        lang=args.lang,
-        sample_rate=args.sample_rate,
-        realtime=_parse_bool_or_none(args.realtime),
-        refined=_parse_bool_or_none(args.refined),
-        final=_parse_bool_or_none(args.final),
-        store_recording=_parse_bool_or_none(args.store_recording),
-        refinement_window_sec=args.refinement_window_sec,
-        rt_partial_enable=_parse_bool_or_none(args.rt_partial_enable),
-        window_size=args.window_size,
-        overlap=args.overlap,
-        emit_every=args.emit_every,
-    ):
-        _print_json(event)
-        if args.stop_on_final:
-            if event.get("type") in ("refined", "asr") and bool(event.get("final")):
-                break
+    stream_options = {
+        "session_id": session_id,
+        "pcm_frames": frames,
+        "lang": args.lang,
+        "sample_rate": args.sample_rate,
+        "realtime": _parse_bool_or_none(args.realtime),
+        "refined": _parse_bool_or_none(args.refined),
+        "final": _parse_bool_or_none(args.final),
+        "store_recording": _parse_bool_or_none(args.store_recording),
+        "refinement_window_sec": args.refinement_window_sec,
+        "rt_partial_enable": _parse_bool_or_none(args.rt_partial_enable),
+        "window_size": args.window_size,
+        "overlap": args.overlap,
+        "emit_every": args.emit_every,
+    }
+
+    if args.stop_on_final:
+        stream = client.transcribe_pcm(**stream_options)
+        try:
+            async for event in stream:
+                _print_json(event)
+                if event.get("type") in ("refined", "asr") and bool(event.get("final")):
+                    break
+        finally:
+            await stream.aclose()
+            await asyncio.to_thread(client.finish_session, session_id)
+        return 0
+
+    await client.transcribe_pcm_until_complete(
+        **stream_options,
+        on_event=_print_json,
+        event_idle_timeout_s=args.event_idle_timeout_s,
+        completion_timeout_s=args.completion_timeout_s,
+        completion_poll_interval_s=args.completion_poll_interval_s,
+    )
     return 0
 
 
@@ -222,7 +238,28 @@ def main(argv: list[str] | None = None) -> None:
     p_wav.add_argument(
         "--stop-on-final",
         action="store_true",
-        help="Stop when the first final ASR event is received (final-per-window semantics)",
+        help=(
+            "Stop when the first final ASR event is received, then explicitly finish the session. "
+            "This can stop before all audio and asynchronous outputs are processed."
+        ),
+    )
+    p_wav.add_argument(
+        "--event-idle-timeout-s",
+        type=float,
+        default=15.0,
+        help="Close the events socket after this idle period once audio is sent (default: 15)",
+    )
+    p_wav.add_argument(
+        "--completion-timeout-s",
+        type=float,
+        default=180.0,
+        help="Maximum wait for persisted final output (default: 180)",
+    )
+    p_wav.add_argument(
+        "--completion-poll-interval-s",
+        type=float,
+        default=1.0,
+        help="Recording-detail polling interval while waiting for completion (default: 1)",
     )
     p_wav.set_defaults(_cmd="transcribe_wav")
 

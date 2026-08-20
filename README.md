@@ -283,7 +283,7 @@ async def main() -> None:
         frame_bytes=3200,  # 100ms @ 16kHz mono PCM16
     )
 
-    async for evt in client.transcribe_pcm(
+    detail = await client.transcribe_pcm_until_complete(
         session_id=session_id,
         pcm_frames=frames,
         lang="en",  # or "de", etc.
@@ -295,19 +295,12 @@ async def main() -> None:
         # store_recording=True,
         # refinement_window_sec=60.0,
         # rt_partial_enable=True,
-        # rt_window_sec=5.0,
-        # rt_overlap_sec=0.5,
-        # rt_emit_every_sec=1.0,
-    ):
-        # evt is a dict, typically with keys: type, session_id, seq, ts_ms, ...
-        print(evt)
-
-        # optional: stop on first final ASR message.
-        # NOTE: the realtime ASR service emits multiple PARTIAL events and then
-        # a FINAL event *per window*; this will therefore usually stop before
-        # the whole audio is fully transcribed.
-        if evt.get("type") in ("refined", "asr") and evt.get("final") is True:
-            break
+        # window_size=5.0,
+        # overlap=0.5,
+        # emit_every=1.0,
+        on_event=print,
+    )
+    print("persisted", detail["session"]["status"])
 
 
 if __name__ == "__main__":
@@ -315,6 +308,12 @@ if __name__ == "__main__":
 ```
 
 ## WebSockets API (realtime ASR)
+
+`transcribe_pcm_until_complete()` is intended for finite recordings. It closes
+the event stream after post-audio inactivity, explicitly finishes the session,
+and waits for the persisted final transcript. Use the lower-level
+`transcribe_pcm()` iterator for open-ended/live capture and close or cancel that
+iterator when capture stops.
 
 The REST API is documented in Swagger (`/docs`) but WebSockets are currently not
 modeled in the OpenAPI spec. This section documents the realtime ASR WS

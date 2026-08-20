@@ -29,6 +29,7 @@ All WS methods are async.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import inspect
 import json
@@ -837,6 +838,7 @@ class NanosamuraiClient:
         window_size: float | None = None,
         overlap: float | None = None,
         emit_every: float | None = None,
+        event_idle_timeout_s: float | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream PCM16LE frames to `/ws/audio` while yielding `/ws/events`.
 
@@ -864,6 +866,9 @@ class NanosamuraiClient:
                 Mapped to the BFF's `/ws/audio` query param `rt_overlap_sec`.
             emit_every: Optional realtime ASR emit frequency in seconds.
                 Mapped to the BFF's `/ws/audio` query param `rt_emit_every_sec`.
+            event_idle_timeout_s: After all audio is sent, close the events
+                socket when no event arrives for this many seconds. Omit for
+                an open-ended event stream.
 
         Returns:
             Async iterator of event dicts.
@@ -872,7 +877,14 @@ class NanosamuraiClient:
             This opens two websocket connections:
             - events: receives events
             - audio: sends frames
+
+            Audio producer and websocket errors are surfaced as ``WsError``.
+            For finite recordings that should be finalized and persisted, use
+            ``transcribe_pcm_until_complete()``.
         """
+
+        if event_idle_timeout_s is not None and event_idle_timeout_s <= 0:
+            raise ValueError("event_idle_timeout_s must be greater than zero")
 
         events_url = self._ws_url("/ws/events", {"session_id": session_id})
         audio_q: dict[str, Any] = {
@@ -911,23 +923,47 @@ class NanosamuraiClient:
 
         events_ws = await self._ws_connect(events_url)
         audio_ws = await self._ws_connect(audio_url)
+        event_activity = asyncio.Event()
 
         async def _send_audio() -> None:
             try:
-                for frame in pcm_frames:
-                    if not isinstance(frame, (bytes, bytearray, memoryview)):
-                        raise WsError("pcm_frames must yield bytes-like objects")
-                    await audio_ws.send(bytes(frame))
-            finally:
-                # half-close isn't supported; just close.
-                await audio_ws.close()
+                try:
+                    for frame in pcm_frames:
+                        if not isinstance(frame, (bytes, bytearray, memoryview)):
+                            raise WsError("pcm_frames must yield bytes-like objects")
+                        await audio_ws.send(bytes(frame))
+                finally:
+                    await audio_ws.close()
+            except BaseException:
+                # Unblock the receive loop so sender failures cannot hide
+                # behind an otherwise idle events websocket.
+                await events_ws.close()
+                raise
 
-        send_task = None
+        async def _close_events_after_idle(send_task: asyncio.Task[None]) -> None:
+            try:
+                await send_task
+            except BaseException:
+                return
+
+            assert event_idle_timeout_s is not None
+            while True:
+                event_activity.clear()
+                try:
+                    await asyncio.wait_for(event_activity.wait(), timeout=event_idle_timeout_s)
+                except TimeoutError:
+                    await events_ws.close()
+                    return
+
+        send_task: asyncio.Task[None] | None = None
+        idle_task: asyncio.Task[None] | None = None
+        send_error: Exception | None = None
         try:
-            import asyncio
-
             send_task = asyncio.create_task(_send_audio())
+            if event_idle_timeout_s is not None:
+                idle_task = asyncio.create_task(_close_events_after_idle(send_task))
             async for msg in events_ws:
+                event_activity.set()
                 if isinstance(msg, bytes):
                     continue
                 evt = json.loads(msg)
@@ -941,9 +977,126 @@ class NanosamuraiClient:
             try:
                 await events_ws.close()
             finally:
+                if idle_task is not None:
+                    idle_task.cancel()
+                    try:
+                        await idle_task
+                    except asyncio.CancelledError:
+                        pass
                 if send_task is not None:
+                    if not send_task.done():
+                        send_task.cancel()
                     try:
                         await send_task
-                    except Exception:
-                        # audio send failures shouldn't mask event close
+                    except asyncio.CancelledError:
                         pass
+                    except Exception as exc:  # noqa: BLE001
+                        send_error = exc
+
+        if send_error is not None:
+            if isinstance(send_error, WsError):
+                raise send_error
+            raise WsError("Audio streaming failed") from send_error
+
+    async def transcribe_pcm_until_complete(
+        self,
+        *,
+        session_id: str,
+        pcm_frames: Iterable[bytes],
+        lang: str = "",
+        sample_rate: int = 16000,
+        realtime: bool | None = None,
+        refined: bool | None = None,
+        final: bool | None = None,
+        store_recording: bool | None = None,
+        refinement_window_sec: float | None = None,
+        rt_partial_enable: bool | None = None,
+        window_size: float | None = None,
+        overlap: float | None = None,
+        emit_every: float | None = None,
+        on_event: Any | None = None,
+        event_idle_timeout_s: float = 15.0,
+        completion_timeout_s: float = 180.0,
+        completion_poll_interval_s: float = 1.0,
+    ) -> dict[str, Any]:
+        """Stream finite PCM input and wait for persisted session completion.
+
+        This batch-oriented helper consumes the event stream, closes it after
+        an idle period once all audio has been sent, explicitly finishes the
+        BFF session, and polls recording detail until final output is ready.
+
+        ``on_event`` may be a synchronous or asynchronous callable accepting
+        each WebSocket event. The returned dict is the final response from
+        ``GET /api/recordings/:session_id``.
+        """
+
+        if event_idle_timeout_s <= 0:
+            raise ValueError("event_idle_timeout_s must be greater than zero")
+        if completion_timeout_s <= 0:
+            raise ValueError("completion_timeout_s must be greater than zero")
+        if completion_poll_interval_s <= 0:
+            raise ValueError("completion_poll_interval_s must be greater than zero")
+
+        stream = self.transcribe_pcm(
+            session_id=session_id,
+            pcm_frames=pcm_frames,
+            lang=lang,
+            sample_rate=sample_rate,
+            realtime=realtime,
+            refined=refined,
+            final=final,
+            store_recording=store_recording,
+            refinement_window_sec=refinement_window_sec,
+            rt_partial_enable=rt_partial_enable,
+            window_size=window_size,
+            overlap=overlap,
+            emit_every=emit_every,
+            event_idle_timeout_s=event_idle_timeout_s,
+        )
+        try:
+            try:
+                async for event in stream:
+                    if on_event is not None:
+                        callback_result = on_event(event)
+                        if inspect.isawaitable(callback_result):
+                            await callback_result
+            finally:
+                await stream.aclose()
+        except BaseException:
+            try:
+                await asyncio.to_thread(self.finish_session, session_id)
+            except Exception:
+                # Preserve the primary streaming/callback failure. The caller
+                # still receives the error that made transcription abort.
+                pass
+            raise
+
+        await asyncio.to_thread(self.finish_session, session_id)
+
+        expect_final = final is not False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + completion_timeout_s
+        last_detail: dict[str, Any] | None = None
+
+        while loop.time() < deadline:
+            try:
+                last_detail = await asyncio.to_thread(self.get_recording, session_id)
+            except ApiError as exc:
+                if exc.status_code not in (404, 503):
+                    raise
+            else:
+                session = last_detail.get("session")
+                if isinstance(session, dict) and session.get("status") == "finished":
+                    final_ready = bool(session.get("has_final_transcript"))
+                    if not expect_final or final_ready:
+                        return last_detail
+
+            await asyncio.sleep(completion_poll_interval_s)
+
+        status = None
+        if last_detail is not None and isinstance(last_detail.get("session"), dict):
+            status = last_detail["session"].get("status")
+        raise ApiError(
+            "Timed out waiting for session completion",
+            body=json.dumps({"session_id": session_id, "last_status": status}),
+        )
