@@ -40,6 +40,10 @@ async def test_live_transcription_reaches_persisted_final_output() -> None:
     try:
         timestamp = datetime.now(UTC).isoformat(timespec="seconds")
         session_id = client.create_session(title=f"SDK live integration {timestamp}")
+        renamed_title = f"SDK live integration running {timestamp}"
+        rename_response = client.rename_session(session_id, title=renamed_title)
+        assert rename_response["title"] == renamed_title
+
         detail = await client.transcribe_pcm_until_complete(
             session_id=session_id,
             pcm_frames=wav_to_pcm_frames(str(wav_path)),
@@ -57,6 +61,7 @@ async def test_live_transcription_reaches_persisted_final_output() -> None:
         session = detail["session"]
         transcripts = detail["transcripts"]
         assert session["status"] == "finished"
+        assert session["title"] == renamed_title
         assert session["has_recording"] is True
         assert session["has_final_transcript"] is True
         assert transcripts["refined"]
@@ -73,6 +78,8 @@ async def test_live_transcription_reaches_persisted_final_output() -> None:
         assert isinstance(client.list_webhooks().get("items"), list)
         assert client.get_workflow_defaults().get("ok") is True
         assert client.get_webhook_defaults().get("ok") is True
+        outcomes = client.list_webhook_delivery_outcomes(session_id)
+        assert isinstance(outcomes.get("items"), list)
     finally:
         if session_id is not None:
             try:
