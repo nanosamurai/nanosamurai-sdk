@@ -32,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import inspect
 import json
+from pathlib import Path
 from typing import Any, AsyncIterator, Iterable
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
@@ -48,6 +49,7 @@ class RecordingItem:
 
     session_id: str
     session_key: str | None
+    title: str | None
     status: str | None
     started_at: str | None
     ended_at: str | None
@@ -245,6 +247,18 @@ class NanosamuraiClient:
             raise ApiError("Invalid response from /api/sessions/:id", status_code=resp.status_code, body=resp.text)
         return data
 
+    def finish_session(self, session_id: str) -> dict[str, Any]:
+        """Explicitly mark a session as finished.
+
+        Calls: POST /api/sessions/:session_id/finish
+
+        This is the authoritative BFF state-machine transition to use when a
+        client has stopped sending audio. The endpoint is safe to call after
+        closing the session WebSockets.
+        """
+
+        return self._rest_json("POST", f"/api/sessions/{session_id}/finish")
+
     def list_recordings(self, *, limit: int = 200, offset: int = 0) -> list[RecordingItem]:
         """List recordings/sessions for the authenticated tenant.
 
@@ -283,6 +297,7 @@ class NanosamuraiClient:
                 RecordingItem(
                     session_id=sid,
                     session_key=it.get("session_key"),
+                    title=it.get("title"),
                     status=it.get("status"),
                     started_at=it.get("started_at"),
                     ended_at=it.get("ended_at"),
@@ -328,6 +343,42 @@ class NanosamuraiClient:
         """
 
         return self._rest_json("DELETE", f"/api/speakers/{speaker_id}")
+
+    def create_speaker(self, *, label: str, sample_path: str) -> dict[str, Any]:
+        """Enroll a speaker from a WAV sample.
+
+        Calls: POST /api/speakers
+
+        The BFF expects multipart form fields named ``label`` and ``sample``.
+        The sample is streamed from disk by httpx and is never loaded into a
+        JSON payload.
+        """
+
+        url = self._rest_url("/api/speakers")
+        sample = Path(sample_path)
+        with sample.open("rb") as sample_file:
+            files = {"sample": (sample.name, sample_file, "audio/wav")}
+            with httpx.Client(timeout=self._timeout_s) as client:
+                resp = client.post(
+                    url,
+                    headers=self._authz_headers(),
+                    data={"label": label},
+                    files=files,
+                )
+        if resp.status_code // 100 != 2:
+            raise ApiError(
+                "Failed to create speaker",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ApiError(
+                "Invalid response from /api/speakers",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        return data
 
     def create_speaker_from_recording(
         self,

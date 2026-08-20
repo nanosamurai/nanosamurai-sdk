@@ -240,6 +240,16 @@ session_id = client.create_session(
 print("session_id", session_id)
 ```
 
+When audio capture ends, explicitly close the BFF session state machine:
+
+```python
+client.finish_session(session_id)
+```
+
+The SDK also supports both speaker-enrollment routes. Upload a WAV sample with
+`client.create_speaker(label="Alice", sample_path="alice.wav")`, or enroll from
+a stored recording with `client.create_speaker_from_recording(...)`.
+
 ### WebSockets: transcribe a WAV file (stream audio + receive events)
 
 The BFF expects **PCM16LE mono @ 16kHz** frames sent as **binary** messages to

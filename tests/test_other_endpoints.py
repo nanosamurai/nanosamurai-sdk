@@ -52,6 +52,33 @@ def test_speakers_endpoints(monkeypatch) -> None:
 
 
 @respx.mock
+def test_create_speaker_uploads_multipart_sample(monkeypatch, tmp_path) -> None:
+    client = _client()
+    monkeypatch.setattr(client, "get_access_token", lambda: "tok")
+    sample = tmp_path / "speaker.wav"
+    sample.write_bytes(b"RIFF....WAVE")
+
+    captured: httpx.Request | None = None
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        nonlocal captured
+        captured = request
+        return httpx.Response(200, json={"ok": True, "speaker_id": "sp3"})
+
+    respx.post("https://platform.example/api/speakers").mock(side_effect=_capture)
+
+    result = client.create_speaker(label="Alice", sample_path=str(sample))
+
+    assert result["speaker_id"] == "sp3"
+    assert captured is not None
+    assert captured.headers["content-type"].startswith("multipart/form-data; boundary=")
+    assert b'name="label"' in captured.content
+    assert b"Alice" in captured.content
+    assert b'name="sample"; filename="speaker.wav"' in captured.content
+    assert b"RIFF....WAVE" in captured.content
+
+
+@respx.mock
 def test_api_credentials_endpoints(monkeypatch) -> None:
     client = _client()
     monkeypatch.setattr(client, "get_access_token", lambda: "tok")
