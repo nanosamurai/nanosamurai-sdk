@@ -16,12 +16,11 @@ def _args(*, stop_on_final: bool) -> SimpleNamespace:
         final="true",
         store_recording="true",
         refinement_window_sec=None,
-        rt_partial_enable=None,
-        window_size=None,
-        overlap=None,
-        emit_every=None,
+        realtime_tracks=["faster-whisper"],
+        refinement_tracks=None,
+        final_tracks=None,
+        realtime_settings={"faster-whisper": {"partial_enable": False}},
         stop_on_final=stop_on_final,
-        event_idle_timeout_s=2.0,
         completion_timeout_s=30.0,
         completion_poll_interval_s=0.1,
     )
@@ -49,7 +48,8 @@ async def test_cli_waits_for_persisted_completion_by_default(monkeypatch, capsys
     assert len(calls) == 1
     assert calls[0]["session_id"] == "session-id"
     assert calls[0]["final"] is True
-    assert calls[0]["event_idle_timeout_s"] == 2.0
+    assert calls[0]["realtime_tracks"] == ["faster-whisper"]
+    assert calls[0]["realtime_settings"] == {"faster-whisper": {"partial_enable": False}}
     assert '"status": "started"' in capsys.readouterr().out
 
 

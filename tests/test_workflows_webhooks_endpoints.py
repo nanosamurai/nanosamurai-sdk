@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 import respx
 
@@ -64,7 +65,8 @@ def test_workflows_crud_endpoints(monkeypatch) -> None:
     respx.post("https://platform.example/api/workflows").mock(
         return_value=httpx.Response(200, json={"ok": True, "workflow_id": "wf"})
     )
-    assert client.create_workflow({"name": "x"})["workflow_id"] == "wf"
+    assert client.create_workflow({"name": "x", "trigger": {
+        "type": "transcript.final.ready", "track_id": "whisperx"}})["workflow_id"] == "wf"
 
     respx.put("https://platform.example/api/workflows/abc").mock(
         return_value=httpx.Response(200, json={"ok": True})
@@ -85,3 +87,11 @@ def test_workflows_crud_endpoints(monkeypatch) -> None:
         return_value=httpx.Response(200, json={"ok": True})
     )
     assert client.set_workflow_defaults(["id1", "id2"])["ok"] is True
+
+
+@pytest.mark.parametrize("trigger", [None, {"type": "transcript.final.ready"},
+    {"type": "transcript.refined.segment", "track_id": ""},
+    {"type": "recording.finished", "track_id": "whisperx"}])
+def test_invalid_workflow_trigger_rejected_before_network(trigger):
+    with pytest.raises(ValueError):
+        _client().create_workflow({"name": "invalid", "trigger": trigger})

@@ -25,6 +25,7 @@ import sys
 from typing import Any
 
 from .audio import wav_to_pcm_frames
+from .streaming import track_ids
 from .client import NanosamuraiClient
 from .errors import NanosamuraiError
 
@@ -116,10 +117,10 @@ async def _cmd_transcribe_wav(args: argparse.Namespace) -> int:
         "final": _parse_bool_or_none(args.final),
         "store_recording": _parse_bool_or_none(args.store_recording),
         "refinement_window_sec": args.refinement_window_sec,
-        "rt_partial_enable": _parse_bool_or_none(args.rt_partial_enable),
-        "window_size": args.window_size,
-        "overlap": args.overlap,
-        "emit_every": args.emit_every,
+        "realtime_tracks": args.realtime_tracks,
+        "refinement_tracks": args.refinement_tracks,
+        "final_tracks": args.final_tracks,
+        "realtime_settings": args.realtime_settings,
     }
 
     if args.stop_on_final:
@@ -137,7 +138,6 @@ async def _cmd_transcribe_wav(args: argparse.Namespace) -> int:
     await client.transcribe_pcm_until_complete(
         **stream_options,
         on_event=_print_json,
-        event_idle_timeout_s=args.event_idle_timeout_s,
         completion_timeout_s=args.completion_timeout_s,
         completion_poll_interval_s=args.completion_poll_interval_s,
     )
@@ -164,10 +164,13 @@ def main(argv: list[str] | None = None) -> None:
     p_rec_list = rec_sub.add_parser("list", help="List recordings")
     p_rec_list.add_argument("--limit", type=int, default=200)
     p_rec_list.add_argument("--offset", type=int, default=0)
+    p_rec_list.add_argument("--show-drafts", action="store_true", default=None)
+    p_rec_list.add_argument("--with-counts", action="store_true", help="Include pagination counts")
     p_rec_list.set_defaults(_cmd="recordings_list")
 
     p_rec_get = rec_sub.add_parser("get", help="Get recording detail")
     p_rec_get.add_argument("session_id")
+    p_rec_get.add_argument("--track-id", help="Filter both refinement and final transcripts")
     p_rec_get.set_defaults(_cmd="recordings_get")
 
     p_rec_audio = rec_sub.add_parser("audio", help="Download recording audio (WAV)")
@@ -211,28 +214,14 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Refinement window size in seconds (maps to /ws/audio refinement_window_sec)",
     )
+    for stage in ("realtime", "refinement", "final"):
+        p_wav.add_argument(
+            f"--{stage}-tracks", type=lambda value: track_ids(value.split(","), "tracks"),
+            help="Comma-separated track IDs; omit to use configured server defaults",
+        )
     p_wav.add_argument(
-        "--window-size",
-        type=float,
-        default=None,
-        help="Realtime ASR window size in seconds (maps to /ws/audio rt_window_sec)",
-    )
-    p_wav.add_argument(
-        "--overlap",
-        type=float,
-        default=None,
-        help="Realtime ASR window overlap in seconds (maps to /ws/audio rt_overlap_sec)",
-    )
-    p_wav.add_argument(
-        "--emit-every",
-        type=float,
-        default=None,
-        help="Emit PARTIAL ASR updates every N seconds (maps to /ws/audio rt_emit_every_sec)",
-    )
-    p_wav.add_argument(
-        "--rt-partial-enable",
-        default=None,
-        help="Whether realtime ASR should emit PARTIAL hypotheses (true|false). Omit to use server default.",
+        "--realtime-settings", type=json.loads,
+        help="JSON object mapping realtime track IDs to capability-defined settings",
     )
     p_wav.add_argument("--session-id", help="Use existing session id (default: create new)")
     p_wav.add_argument(
@@ -244,16 +233,10 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     p_wav.add_argument(
-        "--event-idle-timeout-s",
-        type=float,
-        default=15.0,
-        help="Close the events socket after this idle period once audio is sent (default: 15)",
-    )
-    p_wav.add_argument(
         "--completion-timeout-s",
         type=float,
         default=180.0,
-        help="Maximum wait for persisted final output (default: 180)",
+        help="Maximum time for streaming and every selected track to finish (default: 180)",
     )
     p_wav.add_argument(
         "--completion-poll-interval-s",
@@ -273,13 +256,14 @@ def main(argv: list[str] | None = None) -> None:
 
         if args._cmd == "recordings_list":
             client = _build_client(args)
-            items = client.list_recordings(limit=args.limit, offset=args.offset)
-            _print_json([asdict(item) for item in items])
+            page = client.list_recordings_page(limit=args.limit, offset=args.offset,
+                                                show_drafts=args.show_drafts)
+            _print_json(asdict(page) if args.with_counts else [asdict(item) for item in page.items])
             return
 
         if args._cmd == "recordings_get":
             client = _build_client(args)
-            _print_json(client.get_recording(args.session_id))
+            _print_json(client.get_recording(args.session_id, track_id=args.track_id))
             return
 
         if args._cmd == "recordings_audio":
@@ -289,6 +273,6 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(asyncio.run(_cmd_transcribe_wav(args)))
 
         raise SystemExit(f"Unknown command: {args._cmd}")
-    except NanosamuraiError as e:
+    except (NanosamuraiError, ValueError, TypeError) as e:
         sys.stderr.write(f"ERROR: {e}\n")
         raise SystemExit(2) from e

@@ -55,15 +55,20 @@ python -m pip install -e ".[dev]"
 
 ## Install from a reviewed Git revision
 
-The SDK is not published to PyPI yet. Install it from the audited commit pinned
-below:
+Version **0.2.0** targets the BFF track API and pagination introduced in PR 149.
+The SDK is not published to PyPI. Install this checkout with `pip install .`,
+or pin a reviewed 0.2 commit after review. Do not install similarly named packages
+from PyPI.
+
+The existing consumer should keep its current **0.1 pin at `5b86461`** until its
+upgrade is coordinated. The following command installs that older SDK:
 
 ```bash
-python -m pip install "git+https://github.com/nanosamurai/nanosamurai-sdk.git@ec5797be2364837e7c7e9dd17644fde60fa7c61a"
+python -m pip install "git+https://github.com/nanosamurai/nanosamurai-sdk.git@5b86461"
 ```
 
-Pin deployments to a reviewed commit or release tag rather than a mutable
-branch. Do not install similarly named packages from PyPI.
+Pin deployments to a reviewed commit or release tag. Version 0.2 does not
+negotiate the old flat realtime-tuning protocol. See [migration notes](#migration-to-02).
 
 ## Endpoint configuration
 
@@ -122,12 +127,14 @@ python -m nanosamurai_sdk token
 
 ```bash
 nanosamurai recordings list
+nanosamurai recordings list --limit 20 --offset 20 --show-drafts --with-counts
 ```
 
 ### Get one recording (includes transcripts)
 
 ```bash
 nanosamurai recordings get <session_id>
+nanosamurai recordings get <session_id> --track-id whisperx
 ```
 
 ### Download recording audio (WAV)
@@ -187,7 +194,15 @@ client = NanosamuraiClient(
 
 items = client.list_recordings(limit=10, offset=0)
 print("recordings", len(items))
+page = client.list_recordings_page(limit=10, offset=10, show_drafts=True)
+print("total", page.total, "drafts", page.drafts_count)
 ```
+
+`list_recordings()` still returns a list. `list_recordings_page()` returns
+`RecordingPage(items, total, drafts_count)`; `total` follows the draft filter.
+Omit `show_drafts` to use the server default. Recording detail and its persisted
+transcript dictionaries retain `track_id`, `model` and `provider_profile_id`.
+Use `get_recording(session_id, track_id="whisperx")` to filter transcript history.
 
 ### REST: list workflows and webhooks
 
@@ -259,6 +274,10 @@ The BFF expects **PCM16LE mono @ 16kHz** frames sent as **binary** messages to
 This example reuses the SDK's WAV helper which validates the format and yields
 PCM frames in ~100ms chunks.
 
+The sender paces PCM at the declared sample rate, including file input. Sending
+a whole file as an immediate burst can overflow the BFF's bounded audio queue.
+Allow at least the audio duration plus inference time in the completion deadline.
+
 ```python
 import asyncio
 import os
@@ -294,10 +313,10 @@ async def main() -> None:
         # final=True,
         # store_recording=True,
         # refinement_window_sec=60.0,
-        # rt_partial_enable=True,
-        # window_size=5.0,
-        # overlap=0.5,
-        # emit_every=1.0,
+        # realtime_tracks=["faster-whisper"],
+        # refinement_tracks=["whisperx"],
+        # final_tracks=["whisperx"],
+        # realtime_settings={"faster-whisper": {"window_sec": 10, "overlap_sec": 0.5}},
         on_event=print,
     )
     print("persisted", detail["session"]["status"])
@@ -310,10 +329,17 @@ if __name__ == "__main__":
 ## WebSockets API (realtime ASR)
 
 `transcribe_pcm_until_complete()` is intended for finite recordings. It closes
-the event stream after post-audio inactivity, explicitly finishes the session,
-and waits for the persisted final transcript. Use the lower-level
+audio, explicitly finishes the session and uses its persisted `stream_controls`
+to resolve the admitted tracks. It waits for each realtime track's `stopped`
+event, each selected final track's saved result, and each refinement track's
+saved tail through the sent audio duration. Disabled stages need no output.
+The first realtime `final=true` window and the session-wide final flag are
+insufficient. `completion_timeout_s` covers connection, streaming and persistence,
+even while events keep arriving. Cleanup has its own network timeouts.
+The helper does not wait for workflows or webhook delivery. Use the lower-level
 `transcribe_pcm()` iterator for open-ended/live capture and close or cancel that
-iterator when capture stops.
+iterator when capture stops. Its optional `event_idle_timeout_s` only limits
+post-audio inactivity; it does not establish completion.
 
 The REST API is documented in Swagger (`/docs`) but WebSockets are currently not
 modeled in the OpenAPI spec. This section documents the realtime ASR WS
@@ -363,6 +389,10 @@ All events share these common fields:
 - `session_id`: the session UUID
 - `seq`: monotonic per-session sequence number
 - `ts_ms`: event timestamp (epoch milliseconds)
+
+Transcription and provider status events include `track`, `model` and
+`provider_profile_id` where supplied by the service. The SDK preserves these
+fields without collapsing results from different tracks.
 
 #### status
 
@@ -503,10 +533,10 @@ change them mid-connection).
 | `final` | bool | `true` | Produce final transcript artifacts for the session. |
 | `store_recording` | bool | `true` | Keep the recording for later playback/download. Only relevant when `final=true`. |
 | `refinement_window_sec` | float | server default | Tuning for refined transcript production. |
-| `rt_partial_enable` | bool | server default | If `false`, realtime PARTIAL hypotheses are suppressed (FINALs still emit). |
-| `rt_window_sec` | float | server default | Realtime ASR window size in seconds. |
-| `rt_overlap_sec` | float | server default | Realtime ASR overlap in seconds. |
-| `rt_emit_every_sec` | float | server default | Emit PARTIAL realtime updates every N seconds. |
+| `realtime_tracks` | comma-separated IDs | server default | Select realtime tracks; Python takes a list of strings. |
+| `refinement_tracks` | comma-separated IDs | server default | Select refinement tracks. |
+| `final_tracks` | comma-separated IDs | server default | Select final tracks. Multiple final tracks require recording retention. |
+| `realtime_settings` | JSON object keyed by track ID | service defaults | Provider-specific settings, advertised by `/api/me`. |
 
 Notes on defaults:
 - When you **omit** an optional parameter, the server applies its default.
@@ -540,30 +570,59 @@ Optional refinement tuning knob.
 /ws/audio?session_id=<uuid>&refinement_window_sec=60
 ```
 
-#### Realtime tuning: `rt_partial_enable` / `rt_window_sec` / `rt_overlap_sec` / `rt_emit_every_sec`
+#### Track selection and realtime settings
 
-These parameters tune realtime ASR behavior.
+`client.me()` exposes `default_tracks`, `realtime_tracks`,
+`realtime_track_capabilities` and `async_tracks`. Omitted selections use the
+deployment defaults. Dev selects Faster Whisper medium for realtime and
+WhisperX medium for refinement/final; it admits one realtime stream at a time.
+Selecting a track does not enable a disabled stage. Explicit empty, duplicate
+or malformed lists fail locally; the server checks configured availability.
 
-Example:
-
+```bash
+nanosamurai transcribe wav path/to/audio.wav \
+  --realtime-tracks faster-whisper --refinement-tracks whisperx --final-tracks whisperx \
+  --realtime-settings '{"faster-whisper":{"partial_enable":false,"window_sec":10}}'
 ```
-/ws/audio?session_id=<uuid>&lang=en&sample_rate=16000&rt_partial_enable=true&rt_window_sec=5.0&rt_overlap_sec=0.5&rt_emit_every_sec=1.0
+
+Read the selected provider's advertised setting types and limits before tuning.
+For Faster Whisper, larger `window_sec` increases context and latency;
+`emit_every_sec` controls partial-update frequency, and `overlap_sec` adds
+overlap between windows. Other providers may expose different settings.
+
+### Workflow trigger tracks
+
+Transcript workflows require an explicit source track, including when created
+through the CLI JSON payload. For example:
+
+```python
+trigger = {"type": "transcript.final.ready", "track_id": "whisperx"}
+# Include this trigger in client.create_workflow({...}).
 ```
 
-Note: `rt_emit_every_sec` may have a server-side minimum (to avoid excessive
-update frequency).
+`transcript.refined.segment` also requires `track_id`. `recording.finished`
+rejects a track. Updates that omit `trigger` retain the existing definition.
 
-Tradeoffs:
+## Migration to 0.2
 
-- `rt_window_sec`:
-  - larger → more context / typically better stability, but higher latency
-  - smaller → lower latency, but less context (more unstable hypotheses)
-- `rt_emit_every_sec`:
-  - smaller → more frequent PARTIAL updates (more “live”), but more WS traffic
-  - larger → fewer updates, but UI feels less responsive
-- `rt_overlap_sec`:
-  - can reduce word-boundary errors between windows
-  - increases duplicated audio processing (more compute)
+Default transcription calls still use the same Whisper services when track
+arguments are omitted. `list_recordings()` retains its list return type.
+The following deliberate API changes require review for existing callers:
+
+| Previous Python / CLI option | Version 0.2 replacement |
+|---|---|
+| `rt_partial_enable` / `--rt-partial-enable` | `realtime_settings[track]["partial_enable"]` |
+| `window_size` / `--window-size` | `realtime_settings[track]["window_sec"]` |
+| `overlap` / `--overlap` | `realtime_settings[track]["overlap_sec"]` |
+| `emit_every` / `--emit-every` | `realtime_settings[track]["emit_every_sec"]` |
+| Finite helper `event_idle_timeout_s` / CLI `--event-idle-timeout-s` | `completion_timeout_s` / `--completion-timeout-s` bounds the whole operation |
+| Transcript workflow without source track | Add `trigger.track_id` |
+
+Do not pass removed flat options: the SDK rejects them rather than silently
+ignoring tuning. Upgrade the deployment and client together; keep the existing
+consumer pinned to `5b86461` until that review. There is no automatic fallback
+to a pre-track server. The explicit `--stop-on-final` CLI option still stops at
+the first final window and can truncate audio; omit it for complete recordings.
 
 ## Testing
 
@@ -574,7 +633,8 @@ pytest -q
 ruff check .
 ```
 
-An opt-in live test covers OIDC client credentials, session creation, audio and
+Opt-in live tests cover default tracks, explicit tracks/settings, disabled
+refinement/final stages, capability discovery, pagination, OIDC, session creation, audio and
 event WebSockets, realtime ASR, explicit session finish, persisted refined and
 final transcripts, recording download, and read-only workflow/webhook APIs.
 It requires a mono 16-bit PCM 16kHz WAV file:
@@ -589,9 +649,7 @@ The four standard `NANOSAMURAI_API_URL`, `NANOSAMURAI_ISSUER`,
 `NANOSAMURAI_CLIENT_ID`, and `NANOSAMURAI_CLIENT_SECRET` variables must also be
 set. The explicit `NANOSAMURAI_RUN_LIVE_TESTS=1` gate prevents accidental audio
 uploads. Use only synthetic or otherwise approved test audio. The test deletes
-the session and recording it creates in a `finally` block.
-
-The deployed BFF currently returns HTTP 500 from `/api/me` for M2M principals
-whose Keycloak `email` claim is null because its response schema treats the
-optional field as non-nullable. The SDK intentionally reports that response as
-`ApiError`; correcting it requires a BFF schema fix.
+each test's session and recording in a `finally` block. Test sessions explicitly
+disable tenant workflow and webhook defaults, without changing tenant settings.
+The BFF deployed with this rollout fixes `/api/me` for M2M identities with absent
+optional claims and closes rejected WebSocket upgrade connections at the proxy.

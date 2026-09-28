@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 
@@ -19,7 +19,8 @@ def _required_env(name: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_live_transcription_reaches_persisted_final_output() -> None:
+@pytest.mark.parametrize("selection", ["defaults", "explicit", "realtime-only"])
+async def test_live_transcription_reaches_persisted_final_output(selection) -> None:
     if os.environ.get("NANOSAMURAI_RUN_LIVE_TESTS") != "1":
         pytest.skip("set NANOSAMURAI_RUN_LIVE_TESTS=1 to authorize live audio upload")
 
@@ -38,39 +39,75 @@ async def test_live_transcription_reaches_persisted_final_output() -> None:
     events: list[dict] = []
 
     try:
-        timestamp = datetime.now(UTC).isoformat(timespec="seconds")
-        session_id = client.create_session(title=f"SDK live integration {timestamp}")
+        me = client.me()
+        assert me["authenticated"]
+        defaults = me["default_tracks"]
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        session_id = client.create_session(
+            title=f"SDK live integration {timestamp}",
+            webhook_overrides={"use_defaults": False, "webhook_ids": []},
+            workflow_overrides={"use_defaults": False, "workflow_ids": []},
+        )
         renamed_title = f"SDK live integration running {timestamp}"
         rename_response = client.rename_session(session_id, title=renamed_title)
         assert rename_response["title"] == renamed_title
 
+        options = {}
+        if selection != "defaults":
+            options = {
+                "realtime_tracks": [defaults["realtime"]],
+                "refinement_tracks": [defaults["refined"]],
+                "final_tracks": [defaults["final"]],
+                "realtime_settings": {defaults["realtime"]: {"partial_enable": False}},
+            }
+        if selection == "realtime-only":
+            options.update(refined=False, final=False, store_recording=False)
         detail = await client.transcribe_pcm_until_complete(
             session_id=session_id,
             pcm_frames=wav_to_pcm_frames(str(wav_path)),
             lang=os.environ.get("NANOSAMURAI_TEST_LANG", "en"),
             sample_rate=16000,
-            realtime=True,
-            refined=True,
-            final=True,
-            store_recording=True,
             on_event=events.append,
-            event_idle_timeout_s=float(os.environ.get("NANOSAMURAI_TEST_EVENT_IDLE_S", "15")),
             completion_timeout_s=float(os.environ.get("NANOSAMURAI_TEST_COMPLETION_S", "240")),
+            **options,
         )
 
         session = detail["session"]
         transcripts = detail["transcripts"]
         assert session["status"] == "finished"
         assert session["title"] == renamed_title
-        assert session["has_recording"] is True
-        assert session["has_final_transcript"] is True
-        assert transcripts["refined"]
-        assert transcripts["final"]
-        assert any(event.get("type") == "asr" for event in events)
+        assert any(
+            event.get("type") == "asr" and event.get("track") == defaults["realtime"]
+            for event in events
+        )
+        assert any(
+            event.get("type") == "status"
+            and event.get("status") == "stopped"
+            and event.get("track") == defaults["realtime"]
+            for event in events
+        )
+        controls = session["stream_controls"]
+        assert controls["realtime_tracks"] == [defaults["realtime"]]
+        if selection != "defaults":
+            assert controls["realtime_settings"] == options["realtime_settings"]
+        if selection == "realtime-only":
+            assert not controls["refined"] and not controls["final"]
+            assert not transcripts["refined"] and not transcripts["final"]
+            assert not session["has_recording"]
+        else:
+            assert session["has_recording"] is True
+            assert session["has_final_transcript"] is True
+            assert {row["track_id"] for row in transcripts["refined"]} == {defaults["refined"]}
+            assert {row["track_id"] for row in transcripts["final"]} == {defaults["final"]}
+            filtered = client.get_recording(session_id, track_id=defaults["final"])
+            assert filtered["transcripts"]["final"] == transcripts["final"]
 
-        audio_prefix = client.get_recording_audio_bytes(session_id, range_start=0, range_end=43)
-        assert len(audio_prefix) == 44
-        assert audio_prefix.startswith(b"RIFF")
+            audio_prefix = client.get_recording_audio_bytes(session_id, range_start=0, range_end=43)
+            assert len(audio_prefix) == 44
+            assert audio_prefix.startswith(b"RIFF")
+        page = client.list_recordings_page(limit=2, show_drafts=True)
+        assert page.total >= 1 and page.drafts_count >= 0
+        assert len(page.items) <= 2
 
         # Exercise the configuration endpoints added alongside workflows and
         # webhooks without mutating tenant configuration.
