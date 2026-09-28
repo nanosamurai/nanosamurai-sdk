@@ -42,6 +42,7 @@ import websockets
 
 from .errors import ApiError, WsError
 from .token import KeycloakM2MTokenProvider
+from .streaming import StreamState, audio_query, completion_ready, track_ids
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,15 @@ class RecordingInfo:
     duration_s: float | None
     sample_rate: int | None
     lang: str | None
+
+
+@dataclass(frozen=True)
+class RecordingPage:
+    """One tenant-scoped page, including filtered total and draft counts."""
+
+    items: list[RecordingItem]
+    total: int
+    drafts_count: int
 
 
 class NanosamuraiClient:
@@ -260,19 +270,32 @@ class NanosamuraiClient:
 
         return self._rest_json("POST", f"/api/sessions/{session_id}/finish")
 
-    def list_recordings(self, *, limit: int = 200, offset: int = 0) -> list[RecordingItem]:
+    def list_recordings(self, *, limit: int = 200, offset: int = 0,
+                        show_drafts: bool | None = None) -> list[RecordingItem]:
+        """Return page items; use list_recordings_page() for pagination counts."""
+        return self.list_recordings_page(limit=limit, offset=offset, show_drafts=show_drafts).items
+
+    def list_recordings_page(self, *, limit: int = 200, offset: int = 0,
+                             show_drafts: bool | None = None) -> RecordingPage:
         """List recordings/sessions for the authenticated tenant.
 
         Calls: GET /api/recordings
         """
 
-        url = self._rest_url(f"/api/recordings?{urlencode({'limit': limit, 'offset': offset})}")
+        params: dict[str, Any] = {'limit': limit, 'offset': offset}
+        if show_drafts is not None:
+            if not isinstance(show_drafts, bool):
+                raise TypeError('show_drafts must be a boolean or None')
+            params['show_drafts'] = str(show_drafts).lower()
+        url = self._rest_url(f"/api/recordings?{urlencode(params)}")
         with httpx.Client(timeout=self._timeout_s) as client:
             resp = client.get(url, headers=self._authz_headers())
         if resp.status_code // 100 != 2:
             raise ApiError("Failed to list recordings", status_code=resp.status_code, body=resp.text)
 
         payload = resp.json()
+        if any(type(payload.get(k)) is not int or payload[k] < 0 for k in ('total', 'drafts_count')):
+            raise ApiError('Missing pagination counts in /api/recordings response')
         items = payload.get("items")
         if not isinstance(items, list):
             raise ApiError("Invalid response from /api/recordings", status_code=resp.status_code, body=resp.text)
@@ -308,7 +331,7 @@ class NanosamuraiClient:
                     recording=rec_info,
                 )
             )
-        return out
+        return RecordingPage(items=out, total=payload['total'], drafts_count=payload['drafts_count'])
 
     # -----------------
     # Misc / discovery
@@ -533,6 +556,7 @@ class NanosamuraiClient:
 
         if not isinstance(payload, dict):
             raise TypeError("payload must be a dict")
+        self._validate_workflow_trigger(payload.get('trigger'))
         return self._rest_json("POST", "/api/workflows", json_body=payload)
 
     def update_workflow(self, workflow_id: str, patch: dict[str, Any]) -> dict[str, Any]:
@@ -547,7 +571,23 @@ class NanosamuraiClient:
 
         if not isinstance(patch, dict):
             raise TypeError("patch must be a dict")
+        if 'trigger' in patch:
+            self._validate_workflow_trigger(patch['trigger'])
         return self._rest_json("PUT", f"/api/workflows/{workflow_id}", json_body=patch)
+
+    @staticmethod
+    def _validate_workflow_trigger(trigger: Any) -> None:
+        """Require an explicit source track for transcript workflow definitions."""
+        if not isinstance(trigger, dict):
+            raise ValueError('A workflow requires a trigger object')
+        kind = trigger.get('type')
+        if kind in ('transcript.refined.segment', 'transcript.final.ready'):
+            track_ids([trigger.get('track_id')], 'trigger.track_id')
+        elif kind == 'recording.finished':
+            if 'track_id' in trigger:
+                raise ValueError('recording.finished does not accept a track_id')
+        else:
+            raise ValueError('Unknown workflow trigger type')
 
     def delete_workflow(self, workflow_id: str) -> dict[str, Any]:
         """Delete a workflow.
@@ -576,7 +616,7 @@ class NanosamuraiClient:
 
         return self._rest_json("PUT", "/api/workflows/defaults", json_body={"workflow_ids": workflow_ids})
 
-    def get_recording(self, session_id: str) -> dict[str, Any]:
+    def get_recording(self, session_id: str, *, track_id: str | None = None) -> dict[str, Any]:
         """Fetch recording detail, including transcripts.
 
         Calls: GET /api/recordings/:session_id
@@ -585,9 +625,12 @@ class NanosamuraiClient:
             Parsed JSON as a dict.
         """
 
+        if track_id is not None:
+            track_ids([track_id], 'track_id')
         url = self._rest_url(f"/api/recordings/{session_id}")
         with httpx.Client(timeout=self._timeout_s) as client:
-            resp = client.get(url, headers=self._authz_headers())
+            resp = client.get(url, headers=self._authz_headers(),
+                              params={'track_id': track_id} if track_id is not None else None)
         if resp.status_code // 100 != 2:
             raise ApiError("Failed to fetch recording", status_code=resp.status_code, body=resp.text)
         return resp.json()
@@ -758,7 +801,7 @@ class NanosamuraiClient:
             # websockets renamed `extra_headers` -> `additional_headers` in newer
             # versions (e.g. websockets 16). To keep the SDK flexible across
             # environments, detect the supported kwarg at runtime.
-            headers = self._authz_headers()
+            headers = await asyncio.to_thread(self._authz_headers)
             connect_sig = inspect.signature(websockets.connect)
             if "additional_headers" in connect_sig.parameters:
                 return await websockets.connect(
@@ -821,158 +864,104 @@ class NanosamuraiClient:
             yield evt
 
     async def transcribe_pcm(
-        self,
-        *,
-        session_id: str,
-        pcm_frames: Iterable[bytes],
-        lang: str = "",
-        sample_rate: int = 16000,
-        # Stream controls (/ws/audio query params)
-        realtime: bool | None = None,
-        refined: bool | None = None,
-        final: bool | None = None,
-        store_recording: bool | None = None,
-        refinement_window_sec: float | None = None,
-        # Realtime tuning (/ws/audio query params)
-        rt_partial_enable: bool | None = None,
-        window_size: float | None = None,
-        overlap: float | None = None,
-        emit_every: float | None = None,
+        self, *, session_id: str, pcm_frames: Iterable[bytes], lang: str = "",
+        sample_rate: int = 16000, realtime: bool | None = None,
+        refined: bool | None = None, final: bool | None = None,
+        store_recording: bool | None = None, refinement_window_sec: float | None = None,
+        realtime_tracks: list[str] | None = None, refinement_tracks: list[str] | None = None,
+        final_tracks: list[str] | None = None,
+        realtime_settings: dict[str, dict[str, Any]] | None = None,
         event_idle_timeout_s: float | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Stream PCM16LE frames to `/ws/audio` while yielding `/ws/events`.
+        """Send PCM16LE audio and yield live events with their track identities.
 
-        Inputs:
-            session_id: Must already exist (create via `create_session`).
-            pcm_frames: Iterable of PCM16LE byte chunks.
-            lang: Language code ("en", "cs", "")
-            sample_rate: Sample rate (default 16000)
-            realtime: Whether to run realtime transcription.
-                Maps to `/ws/audio` query param `realtime`.
-                If omitted, the server default applies.
-            refined: Whether to run the refinement pipeline.
-                Maps to `/ws/audio` query param `refined`.
-            final: Whether to produce final transcript artifacts.
-                Maps to `/ws/audio` query param `final`.
-            store_recording: Whether to keep the recording for later playback.
-                Maps to `/ws/audio` query param `store_recording`.
-            refinement_window_sec: Optional refinement window size.
-                Maps to `/ws/audio` query param `refinement_window_sec`.
-            rt_partial_enable: Whether realtime ASR should emit PARTIAL hypotheses.
-                Maps to `/ws/audio` query param `rt_partial_enable`.
-            window_size: Optional realtime ASR window size in seconds.
-                Mapped to the BFF's `/ws/audio` query param `rt_window_sec`.
-            overlap: Optional realtime ASR overlap in seconds.
-                Mapped to the BFF's `/ws/audio` query param `rt_overlap_sec`.
-            emit_every: Optional realtime ASR emit frequency in seconds.
-                Mapped to the BFF's `/ws/audio` query param `rt_emit_every_sec`.
-            event_idle_timeout_s: After all audio is sent, close the events
-                socket when no event arrives for this many seconds. Omit for
-                an open-ended event stream.
+        Omitted track lists use the BFF's configured defaults. Explicit lists
+        select providers independently for each stage; disabled stages remain
+        disabled. ``realtime_settings`` maps track IDs to capability-defined
+        settings, for example ``{"faster-whisper": {"window_sec": 10}}``.
 
-        Returns:
-            Async iterator of event dicts.
-
-        Notes:
-            This opens two websocket connections:
-            - events: receives events
-            - audio: sends frames
-
-            Audio producer and websocket errors are surfaced as ``WsError``.
-            For finite recordings that should be finalized and persisted, use
-            ``transcribe_pcm_until_complete()``.
+        The events connection remains open unless ``event_idle_timeout_s`` is
+        set or the caller closes the iterator. An idle timeout does not prove
+        completion; use ``transcribe_pcm_until_complete`` for finite input.
+        Sender and connection failures raise ``WsError`` and close both sockets.
         """
+        query = audio_query(session_id=session_id, lang=lang, sample_rate=sample_rate,
+            realtime=realtime, refined=refined, final=final, store_recording=store_recording,
+            refinement_window_sec=refinement_window_sec, realtime_tracks=realtime_tracks,
+            refinement_tracks=refinement_tracks, final_tracks=final_tracks,
+            realtime_settings=realtime_settings)
+        stream = self._stream_pcm(query, pcm_frames, StreamState(), event_idle_timeout_s)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await stream.aclose()
 
+    async def _stream_pcm(
+        self, query: dict[str, Any], pcm_frames: Iterable[bytes], state: StreamState,
+        event_idle_timeout_s: float | None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Own both sockets and report successful audio-close progress internally."""
         if event_idle_timeout_s is not None and event_idle_timeout_s <= 0:
             raise ValueError("event_idle_timeout_s must be greater than zero")
-
-        events_url = self._ws_url("/ws/events", {"session_id": session_id})
-        audio_q: dict[str, Any] = {
-            "session_id": session_id,
-            "lang": lang,
-            "sample_rate": sample_rate,
-        }
-
-        def _bool_q(v: bool) -> str:
-            # Be explicit: urlencode() would otherwise produce Python's `True`/`False`.
-            return "true" if v else "false"
-
-        # Stream controls
-        if realtime is not None:
-            audio_q["realtime"] = _bool_q(bool(realtime))
-        if refined is not None:
-            audio_q["refined"] = _bool_q(bool(refined))
-        if final is not None:
-            audio_q["final"] = _bool_q(bool(final))
-        if store_recording is not None:
-            audio_q["store_recording"] = _bool_q(bool(store_recording))
-        if refinement_window_sec is not None:
-            audio_q["refinement_window_sec"] = float(refinement_window_sec)
-
-        # Realtime tuning
-        if rt_partial_enable is not None:
-            audio_q["rt_partial_enable"] = _bool_q(bool(rt_partial_enable))
-        if window_size is not None:
-            audio_q["rt_window_sec"] = float(window_size)
-        if overlap is not None:
-            audio_q["rt_overlap_sec"] = float(overlap)
-        if emit_every is not None:
-            audio_q["rt_emit_every_sec"] = float(emit_every)
-
-        audio_url = self._ws_url("/ws/audio", audio_q)
-
-        events_ws = await self._ws_connect(events_url)
-        audio_ws = await self._ws_connect(audio_url)
+        events_ws = await self._ws_connect(self._ws_url('/ws/events', {'session_id': query['session_id']}))
+        try:
+            audio_ws = await self._ws_connect(self._ws_url('/ws/audio', query))
+        except BaseException:
+            await events_ws.close()
+            raise
         event_activity = asyncio.Event()
 
-        async def _send_audio() -> None:
+        async def send_audio() -> None:
             try:
                 try:
+                    loop = asyncio.get_running_loop()
+                    next_frame_at = loop.time()
                     for frame in pcm_frames:
                         if not isinstance(frame, (bytes, bytearray, memoryview)):
-                            raise WsError("pcm_frames must yield bytes-like objects")
-                        await audio_ws.send(bytes(frame))
+                            raise WsError('pcm_frames must yield bytes-like objects')
+                        payload = bytes(frame)
+                        await audio_ws.send(payload)
+                        state.audio_bytes += len(payload)
+                        # The BFF ingress queue is bounded and drops overflow.
+                        # Pace finite files like live PCM instead of bursting them.
+                        next_frame_at = max(next_frame_at, loop.time()) + len(payload) / (2 * query['sample_rate'])
+                        await asyncio.sleep(max(0, next_frame_at - loop.time()))
                 finally:
                     await audio_ws.close()
+                state.audio_sent = True
             except BaseException:
-                # Unblock the receive loop so sender failures cannot hide
-                # behind an otherwise idle events websocket.
                 await events_ws.close()
                 raise
 
-        async def _close_events_after_idle(send_task: asyncio.Task[None]) -> None:
+        async def close_after_idle(task: asyncio.Task[None]) -> None:
             try:
-                await send_task
+                await task
             except BaseException:
                 return
-
-            assert event_idle_timeout_s is not None
             while True:
                 event_activity.clear()
                 try:
                     await asyncio.wait_for(event_activity.wait(), timeout=event_idle_timeout_s)
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     await events_ws.close()
                     return
 
-        send_task: asyncio.Task[None] | None = None
-        idle_task: asyncio.Task[None] | None = None
+        send_task = asyncio.create_task(send_audio())
+        idle_task = asyncio.create_task(close_after_idle(send_task)) if event_idle_timeout_s is not None else None
         send_error: Exception | None = None
         try:
-            send_task = asyncio.create_task(_send_audio())
-            if event_idle_timeout_s is not None:
-                idle_task = asyncio.create_task(_close_events_after_idle(send_task))
-            async for msg in events_ws:
+            async for message in events_ws:
                 event_activity.set()
-                if isinstance(msg, bytes):
+                if isinstance(message, bytes):
                     continue
-                evt = json.loads(msg)
-                if isinstance(evt, dict):
-                    yield evt
-        except json.JSONDecodeError as e:
-            raise WsError("Received invalid JSON on /ws/events") from e
-        except Exception as e:  # noqa: BLE001
-            raise WsError("Websocket transcription failed") from e
+                event = json.loads(message)
+                if isinstance(event, dict):
+                    yield event
+        except json.JSONDecodeError as error:
+            raise WsError('Received invalid JSON on /ws/events') from error
+        except Exception as error:
+            raise WsError('Websocket transcription failed') from error
         finally:
             try:
                 await events_ws.close()
@@ -983,120 +972,107 @@ class NanosamuraiClient:
                         await idle_task
                     except asyncio.CancelledError:
                         pass
-                if send_task is not None:
-                    if not send_task.done():
-                        send_task.cancel()
-                    try:
-                        await send_task
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception as exc:  # noqa: BLE001
-                        send_error = exc
-
+                if not send_task.done():
+                    send_task.cancel()
+                try:
+                    await send_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as error:
+                    send_error = error
+                await audio_ws.close()
         if send_error is not None:
             if isinstance(send_error, WsError):
                 raise send_error
-            raise WsError("Audio streaming failed") from send_error
+            raise WsError('Audio streaming failed') from send_error
 
     async def transcribe_pcm_until_complete(
-        self,
-        *,
-        session_id: str,
-        pcm_frames: Iterable[bytes],
-        lang: str = "",
-        sample_rate: int = 16000,
-        realtime: bool | None = None,
-        refined: bool | None = None,
-        final: bool | None = None,
-        store_recording: bool | None = None,
-        refinement_window_sec: float | None = None,
-        rt_partial_enable: bool | None = None,
-        window_size: float | None = None,
-        overlap: float | None = None,
-        emit_every: float | None = None,
-        on_event: Any | None = None,
-        event_idle_timeout_s: float = 15.0,
-        completion_timeout_s: float = 180.0,
+        self, *, session_id: str, pcm_frames: Iterable[bytes], lang: str = "",
+        sample_rate: int = 16000, realtime: bool | None = None,
+        refined: bool | None = None, final: bool | None = None,
+        store_recording: bool | None = None, refinement_window_sec: float | None = None,
+        realtime_tracks: list[str] | None = None, refinement_tracks: list[str] | None = None,
+        final_tracks: list[str] | None = None,
+        realtime_settings: dict[str, dict[str, Any]] | None = None,
+        on_event: Any | None = None, completion_timeout_s: float = 180.0,
         completion_poll_interval_s: float = 1.0,
     ) -> dict[str, Any]:
-        """Stream finite PCM input and wait for persisted session completion.
+        """Send finite audio and wait for every admitted track to complete.
 
-        This batch-oriented helper consumes the event stream, closes it after
-        an idle period once all audio has been sent, explicitly finishes the
-        BFF session, and polls recording detail until final output is ready.
+        Uses the persisted stream-controls snapshot to resolve server defaults.
+        Waits for each realtime track's stopped event, all selected final rows,
+        and every refinement track's persisted tail through the audio duration.
+        The deadline covers streaming and persistence, even if events keep
+        arriving. It does not use a session-wide final flag or event silence.
 
-        ``on_event`` may be a synchronous or asynchronous callable accepting
-        each WebSocket event. The returned dict is the final response from
-        ``GET /api/recordings/:session_id``.
+        ``on_event`` may be synchronous or asynchronous. Returns recording detail.
+        Raises ``WsError`` for streaming/provider failures and ``ApiError`` on
+        timeout. Cancellation and errors close both sockets and attempt to finish
+        the session; network cleanup can take its own configured timeout.
         """
+        if completion_timeout_s <= 0 or completion_poll_interval_s <= 0:
+            raise ValueError('Completion timeout and poll interval must be greater than zero')
+        query = audio_query(session_id=session_id, lang=lang, sample_rate=sample_rate,
+            realtime=realtime, refined=refined, final=final, store_recording=store_recording,
+            refinement_window_sec=refinement_window_sec, realtime_tracks=realtime_tracks,
+            refinement_tracks=refinement_tracks, final_tracks=final_tracks,
+            realtime_settings=realtime_settings)
+        state = StreamState()
+        stopped: set[str] = set()
+        stream = self._stream_pcm(query, pcm_frames, state, None)
+        finished = False
 
-        if event_idle_timeout_s <= 0:
-            raise ValueError("event_idle_timeout_s must be greater than zero")
-        if completion_timeout_s <= 0:
-            raise ValueError("completion_timeout_s must be greater than zero")
-        if completion_poll_interval_s <= 0:
-            raise ValueError("completion_poll_interval_s must be greater than zero")
+        async def consume() -> None:
+            async for event in stream:
+                if event.get('type') == 'error':
+                    raise WsError(f"Streaming error on track {event.get('track', 'unknown')}")
+                if event.get('type') == 'status' and event.get('status') == 'stopped' and event.get('track'):
+                    stopped.add(event['track'])
+                if on_event is not None:
+                    result = on_event(event)
+                    if inspect.isawaitable(result):
+                        await result
 
-        stream = self.transcribe_pcm(
-            session_id=session_id,
-            pcm_frames=pcm_frames,
-            lang=lang,
-            sample_rate=sample_rate,
-            realtime=realtime,
-            refined=refined,
-            final=final,
-            store_recording=store_recording,
-            refinement_window_sec=refinement_window_sec,
-            rt_partial_enable=rt_partial_enable,
-            window_size=window_size,
-            overlap=overlap,
-            emit_every=emit_every,
-            event_idle_timeout_s=event_idle_timeout_s,
-        )
-        try:
+        async def complete() -> dict[str, Any]:
+            nonlocal finished
+            consumer = asyncio.create_task(consume())
             try:
-                async for event in stream:
-                    if on_event is not None:
-                        callback_result = on_event(event)
-                        if inspect.isawaitable(callback_result):
-                            await callback_result
+                while True:
+                    if consumer.done():
+                        consumer.result()
+                        if not state.audio_sent:
+                            raise WsError('Events connection closed before audio was sent')
+                    if state.audio_sent:
+                        if not finished:
+                            await asyncio.to_thread(self.finish_session, session_id)
+                            finished = True
+                        try:
+                            detail = await asyncio.to_thread(self.get_recording, session_id)
+                        except ApiError as error:
+                            if error.status_code not in (404, 503):
+                                raise
+                        else:
+                            if completion_ready(detail, stopped, state.audio_bytes / (2 * sample_rate)):
+                                return detail
+                    await asyncio.sleep(completion_poll_interval_s)
             finally:
-                await stream.aclose()
-        except BaseException:
-            try:
-                await asyncio.to_thread(self.finish_session, session_id)
-            except Exception:
-                # Preserve the primary streaming/callback failure. The caller
-                # still receives the error that made transcription abort.
-                pass
+                consumer.cancel()
+                try:
+                    await consumer
+                except asyncio.CancelledError:
+                    pass
+                finally:
+                    await stream.aclose()
+
+        try:
+            return await asyncio.wait_for(complete(), timeout=completion_timeout_s)
+        except BaseException as error:
+            if not finished:
+                try:
+                    await asyncio.to_thread(self.finish_session, session_id)
+                except Exception:
+                    pass
+            if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+                raise ApiError('Timed out waiting for all selected tracks to complete',
+                               body=json.dumps({'session_id': session_id})) from error
             raise
-
-        await asyncio.to_thread(self.finish_session, session_id)
-
-        expect_final = final is not False
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + completion_timeout_s
-        last_detail: dict[str, Any] | None = None
-
-        while loop.time() < deadline:
-            try:
-                last_detail = await asyncio.to_thread(self.get_recording, session_id)
-            except ApiError as exc:
-                if exc.status_code not in (404, 503):
-                    raise
-            else:
-                session = last_detail.get("session")
-                if isinstance(session, dict) and session.get("status") == "finished":
-                    final_ready = bool(session.get("has_final_transcript"))
-                    if not expect_final or final_ready:
-                        return last_detail
-
-            await asyncio.sleep(completion_poll_interval_s)
-
-        status = None
-        if last_detail is not None and isinstance(last_detail.get("session"), dict):
-            status = last_detail["session"].get("status")
-        raise ApiError(
-            "Timed out waiting for session completion",
-            body=json.dumps({"session_id": session_id, "last_status": status}),
-        )

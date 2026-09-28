@@ -59,6 +59,8 @@ def test_list_recordings_preserves_title() -> None:
             json={
                 "ok": True,
                 "tenant_id": "00000000-0000-0000-0000-000000000000",
+                "total": 1,
+                "drafts_count": 0,
                 "items": [
                     {
                         "session_id": "11111111-1111-1111-1111-111111111111",
@@ -120,3 +122,18 @@ def test_recording_detail_outcomes_and_delete_routes() -> None:
     assert detail_route.called
     assert outcomes_route.called
     assert delete_route.called
+
+
+@respx.mock
+def test_pagination_counts_and_track_filter() -> None:
+    client = _client()
+    page_route = respx.get("https://platform.example/api/recordings",
+                          params={"limit": 5, "offset": 10, "show_drafts": "true"}).mock(
+        return_value=httpx.Response(200, json={"items": [], "total": 10, "drafts_count": 3}))
+    detail_route = respx.get("https://platform.example/api/recordings/s",
+                            params={"track_id": "whisperx"}).mock(
+        return_value=httpx.Response(200, json={"transcripts": {"final": []}}))
+    page = client.list_recordings_page(limit=5, offset=10, show_drafts=True)
+    assert (page.items, page.total, page.drafts_count) == ([], 10, 3)
+    assert client.get_recording("s", track_id="whisperx")["transcripts"]["final"] == []
+    assert page_route.called and detail_route.called
