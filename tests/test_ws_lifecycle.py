@@ -224,6 +224,94 @@ async def test_finite_frames_are_paced_to_avoid_ingress_overflow(monkeypatch):
     assert sent_at[-1] - sent_at[0] >= .025
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sample_rate,frame_sizes,send_delays,overshoot,expected_sends,expected_close",
+    [
+        pytest.param(
+            16000, [3200] * 3600, [0.009] * 3600, 0,
+            [i * 0.1 for i in range(3600)], 360,
+            id="six-minutes-send-overhead",
+        ),
+        pytest.param(
+            16000, [3200] * 3600, [0] * 3600, 0.009,
+            [0] + [i * 0.1 + 0.009 for i in range(1, 3600)], 360.009,
+            id="six-minutes-timer-overshoot",
+        ),
+        pytest.param(
+            16000, [3200] * 3600, [0.004] * 3600, 0.005,
+            [0] + [i * 0.1 + 0.005 for i in range(1, 3600)], 360.005,
+            id="six-minutes-combined-overhead",
+        ),
+        pytest.param(
+            8000, [1600, 640, 240], [0.009] * 3, 0,
+            [0, 0.1, 0.14], 0.155,
+            id="8khz-variable-frames-and-short-tail",
+        ),
+        pytest.param(
+            48000, [9600, 3840, 1440], [0.009] * 3, 0,
+            [0, 0.1, 0.14], 0.155,
+            id="48khz-variable-frames-and-short-tail",
+        ),
+        pytest.param(
+            16000, [3200] * 5, [0.009, 0.35, 0.009, 0.009, 0.009], 0,
+            [0, 0.1, 0.45, 0.55, 0.65], 0.75,
+            id="slow-send-resumes-without-catch-up-burst",
+        ),
+    ],
+)
+async def test_pcm_pacing_deadlines(
+    monkeypatch, sample_rate, frame_sizes, send_delays, overshoot,
+    expected_sends, expected_close,
+):
+    """Exercise the real sender with deterministic socket and scheduler delays."""
+    client = _client()
+    events = _EventsWs()
+    now = 1000.0
+    sent_at = []
+    sent_payloads = []
+    closed_at = []
+    delays = iter(send_delays)
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        nonlocal now
+        assert delay >= 0
+        now += delay + (overshoot if delay > 0 else 0)
+        await real_sleep(0)
+
+    class Audio(_AudioWs):
+        async def send(self, payload):
+            nonlocal now
+            sent_at.append(now - 1000.0)
+            sent_payloads.append(payload)
+            now += next(delays)
+
+        async def close(self):
+            if not self.closed:
+                closed_at.append(now - 1000.0)
+            await super().close()
+            await events.close()
+
+    sockets = iter([events, Audio()])
+
+    async def connect(_url):
+        return next(sockets)
+
+    monkeypatch.setattr(client, "_ws_connect", connect)
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: now)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    frames = [b"\0" * size for size in frame_sizes]
+    async for _ in client.transcribe_pcm(
+        session_id="s", pcm_frames=frames, sample_rate=sample_rate,
+    ):
+        pass
+
+    assert sent_payloads == frames
+    assert sent_at == pytest.approx(expected_sends, rel=0, abs=1e-7)
+    assert closed_at == pytest.approx([expected_close], rel=0, abs=1e-7)
+
+
 def test_disabled_stages_do_not_require_selected_tracks():
     detail = {
         "session": {

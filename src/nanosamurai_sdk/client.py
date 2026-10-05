@@ -925,7 +925,12 @@ class NanosamuraiClient:
                         state.audio_bytes += len(payload)
                         # The BFF ingress queue is bounded and drops overflow.
                         # Pace finite files like live PCM instead of bursting them.
-                        next_frame_at = max(next_frame_at, loop.time()) + len(payload) / (2 * query['sample_rate'])
+                        # Advance the deadline before clamping so send time and
+                        # timer overshoot do not accumulate on every frame.
+                        next_frame_at = max(
+                            next_frame_at + len(payload) / (2 * query['sample_rate']),
+                            loop.time(),
+                        )
                         await asyncio.sleep(max(0, next_frame_at - loop.time()))
                 finally:
                     await audio_ws.close()

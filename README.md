@@ -276,6 +276,10 @@ PCM frames in ~100ms chunks.
 
 The sender paces PCM at the declared sample rate, including file input. Sending
 a whole file as an immediate burst can overflow the BFF's bounded audio queue.
+Pacing advances the previous deadline by each frame's duration, so socket work
+and timer overshoot consume the frame budget instead of accumulating drift.
+If a send overruns that budget, pacing resumes from the current time without
+bursting all overdue frames to catch up.
 Allow at least the audio duration plus inference time in the completion deadline.
 
 ```python
