@@ -204,6 +204,24 @@ Omit `show_drafts` to use the server default. Recording detail and its persisted
 transcript dictionaries retain `track_id`, `model` and `provider_profile_id`.
 Use `get_recording(session_id, track_id="whisperx")` to filter transcript history.
 
+### REST: session access
+
+Lists contain only sessions the caller may read. Pass `scope="mine"` or
+`scope="shared"` to filter them. Each item has an `access` object with the
+audience and whether the caller owns the session.
+
+```python
+access = client.get_session_access(session_id)
+client.set_session_access(session_id, visibility="selected",
+                          recipient_ids=[colleague_id], revision=access["revision"])
+```
+
+Visibility is `private`, `selected` or `tenant` (everyone in the organization).
+Sharing is read-only. Only the owner can change it; a stale `revision` returns
+409. Machine credentials read and process only their own sessions and cannot
+share them. Inaccessible sessions return 404, and owner-only actions on a
+shared session return 403.
+
 ### REST: list workflows and webhooks
 
 ```python
