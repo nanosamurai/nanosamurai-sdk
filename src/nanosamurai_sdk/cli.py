@@ -147,7 +147,7 @@ async def _cmd_transcribe_wav(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="nanosamurai", description="nanosamurai-sdk CLI")
     parser.add_argument("--api-url", help="BFF base URL (or env NANOSAMURAI_API_URL)")
-    parser.add_argument("--issuer", help="Keycloak issuer (or env NANOSAMURAI_ISSUER)")
+    parser.add_argument("--issuer", help="OIDC issuer URL (or env NANOSAMURAI_ISSUER)")
     parser.add_argument("--client-id", help="M2M client id (or env NANOSAMURAI_CLIENT_ID)")
     parser.add_argument("--client-secret", help="M2M client secret (or env NANOSAMURAI_CLIENT_SECRET)")
     parser.add_argument("--timeout-s", type=float, default=10.0, help="HTTP timeout (seconds)")

@@ -21,7 +21,7 @@ This client covers the endpoints that make sense for 3rd parties:
   - /ws/audio (binary PCM16LE frames)
 
 Auth model:
-- Uses OAuth2 client_credentials against Keycloak to mint an access token.
+- Uses OAuth2 client_credentials against the OIDC provider to mint an access token.
 - Sends `Authorization: Bearer <token>` to REST + WS.
 
 All WS methods are async.
@@ -41,7 +41,7 @@ import httpx
 import websockets
 
 from .errors import ApiError, WsError
-from .token import KeycloakM2MTokenProvider
+from .token import OIDCClientCredentialsTokenProvider
 from .streaming import StreamState, audio_query, completion_ready, track_ids
 
 
@@ -91,7 +91,7 @@ class NanosamuraiClient:
 
     Inputs:
         api_url: Base URL of the BFF (e.g. `http://127.0.0.1:8000` or `https://bff...`).
-        issuer: Keycloak realm issuer (for discovery).
+        issuer: OIDC issuer (for discovery), e.g. a Keycloak realm URL.
         client_id: M2M client id.
         client_secret: M2M client secret.
         timeout_s: REST timeout.
@@ -108,7 +108,7 @@ class NanosamuraiClient:
     ) -> None:
         self._api_url = api_url.rstrip("/") + "/"
         self._timeout_s = timeout_s
-        self._token_provider = KeycloakM2MTokenProvider(
+        self._token_provider = OIDCClientCredentialsTokenProvider(
             issuer=issuer,
             client_id=client_id,
             client_secret=client_secret,
