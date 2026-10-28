@@ -279,8 +279,8 @@ class NanosamuraiClient:
         ``visibility`` is ``private``, ``selected`` (requires ``recipient_ids``
         of active people in the same organization) or ``tenant`` (everyone in
         the organization). Send the ``revision`` from ``get_session_access``;
-        a stale revision raises ``ApiError`` with 409. Machine credentials
-        cannot share sessions and receive 403.
+        a stale revision raises ``ApiError`` with 409. A personal API key
+        may share the sessions it recorded; an organization key receives 403.
         """
 
         if visibility not in ('private', 'selected', 'tenant'):
@@ -316,8 +316,9 @@ class NanosamuraiClient:
 
         Calls: GET /api/recordings
 
-        ``scope`` is ``"all"`` (default), ``"mine"`` or ``"shared"``. Machine
-        credentials read only their own sessions.
+        ``scope`` is ``"all"`` (default), ``"mine"`` or ``"shared"``. An API
+        key reads only the sessions it recorded, unless it is a personal key
+        created to read everything its owner can read.
         """
 
         params: dict[str, Any] = {'limit': limit, 'offset': offset}
