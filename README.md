@@ -91,9 +91,15 @@ Environment variables:
 The CLI (and examples) read configuration from:
 
 - `NANOSAMURAI_API_URL` – base URL of samuraibff, e.g. `http://127.0.0.1:8000` or `https://platform.nanosamur.ai`
-- `NANOSAMURAI_ISSUER` – OIDC realm issuer, e.g. `http://127.0.0.1:8080/realms/nanosamurai` or `https://auth.nanosamur.ai/realms/nanosamurai`
+- `NANOSAMURAI_ISSUER` – issuer URL of your OIDC provider, e.g. a Keycloak realm `http://127.0.0.1:8080/realms/nanosamurai`
 - `NANOSAMURAI_CLIENT_ID`
 - `NANOSAMURAI_CLIENT_SECRET`
+
+Any OIDC provider that supports the `client_credentials` grant works. The SDK
+reads the token endpoint from the issuer's discovery document. It sends the
+secret in the form body, or with HTTP Basic when discovery lists only
+`client_secret_basic`. If the token response has no `expires_in`, the token is
+reused for 60 seconds.
 
 ## CLI
 
