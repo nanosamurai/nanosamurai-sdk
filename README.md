@@ -218,9 +218,20 @@ client.set_session_access(session_id, visibility="selected",
 
 Visibility is `private`, `selected` or `tenant` (everyone in the organization).
 Sharing is read-only. Only the owner can change it; a stale `revision` returns
-409. Machine credentials read and process only their own sessions and cannot
-share them. Inaccessible sessions return 404, and owner-only actions on a
-shared session return 403.
+409. Inaccessible sessions return 404, and owner-only actions on a shared
+session return 403.
+
+What a credential sees depends on its kind (chosen when it is created in the
+UI; the token flow is the same):
+
+- A **personal** key acts as the person who created it. Sessions it records
+  are theirs: they see, play, share and delete them in the UI. By default the
+  key reads only the sessions it recorded; it can be created to read
+  everything its owner can read. The key may share its own sessions.
+- An **organization** key owns the sessions it records. They start with the
+  key's audience (its manager only, or everyone in the organization), and the
+  key's manager manages them in the UI. The key reads only its own sessions
+  and cannot share them.
 
 ### REST: list workflows and webhooks
 
