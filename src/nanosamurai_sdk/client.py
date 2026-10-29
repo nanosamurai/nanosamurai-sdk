@@ -40,7 +40,7 @@ from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 import httpx
 import websockets
 
-from .errors import ApiError, WsError
+from .errors import SERVER_STOP_REASONS, ApiError, SessionStoppedError, WsError
 from .token import OIDCClientCredentialsTokenProvider
 from .streaming import StreamState, audio_query, completion_ready, track_ids
 
@@ -839,6 +839,17 @@ class NanosamuraiClient:
             url = url + ("?" + urlencode(query))
         return url
 
+    @staticmethod
+    def _server_stop(error: BaseException | None) -> SessionStoppedError | None:
+        """Return a SessionStoppedError when the server closed with a stop code."""
+        while error is not None:
+            frame = getattr(error, "rcvd", None)
+            code = getattr(frame, "code", None) if frame is not None else getattr(error, "code", None)
+            if code in SERVER_STOP_REASONS:
+                return SessionStoppedError(code, SERVER_STOP_REASONS[code])
+            error = error.__cause__
+        return None
+
     async def _ws_connect(self, url: str):
         try:
             # websockets renamed `extra_headers` -> `additional_headers` in newer
@@ -880,6 +891,13 @@ class NanosamuraiClient:
                     raise WsError("Received non-JSON message on /ws/events") from e
                 if isinstance(data, dict):
                     yield data
+        except WsError:
+            raise
+        except Exception as error:
+            stop = self._server_stop(error)
+            if stop is not None:
+                raise stop from error
+            raise
         finally:
             await ws.close()
 
@@ -1009,6 +1027,9 @@ class NanosamuraiClient:
         except json.JSONDecodeError as error:
             raise WsError('Received invalid JSON on /ws/events') from error
         except Exception as error:
+            stop = self._server_stop(error)
+            if stop is not None:
+                raise stop from error
             raise WsError('Websocket transcription failed') from error
         finally:
             try:
@@ -1032,6 +1053,9 @@ class NanosamuraiClient:
         if send_error is not None:
             if isinstance(send_error, WsError):
                 raise send_error
+            stop = self._server_stop(send_error)
+            if stop is not None:
+                raise stop from send_error
             raise WsError('Audio streaming failed') from send_error
 
     async def transcribe_pcm_until_complete(
