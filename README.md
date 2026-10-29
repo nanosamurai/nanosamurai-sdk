@@ -408,7 +408,21 @@ Sends raw audio frames as **binary** messages:
 - sample rate: typically **16kHz**
 
 Auth: both endpoints require `Authorization: Bearer <token>` during the WS
-upgrade (same token as for REST).
+upgrade (same token as for REST). The token is checked only then: an open
+socket keeps running after the token expires. The SDK gets a valid token for
+each new connection.
+
+The BFF re-checks open sockets in the background. It closes them on purpose
+with these codes, which the SDK raises as `SessionStoppedError` (a `WsError`
+with `close_code` and `reason`):
+
+| Code | `reason` | Meaning |
+| --- | --- | --- |
+| 4403 | `access-revoked` | The key was revoked, its owner was suspended or lost the Builder role, or sharing was removed. |
+| 4408 | `max-duration` | The socket reached the maximum duration the operator configured (4 hours by default). |
+| 4503 | `access-unverified` | The BFF could not check access for longer than its grace period. |
+
+Start a new session to continue after any of them.
 
 ### Session lifecycle
 
