@@ -91,9 +91,15 @@ Environment variables:
 The CLI (and examples) read configuration from:
 
 - `NANOSAMURAI_API_URL` – base URL of samuraibff, e.g. `http://127.0.0.1:8000` or `https://platform.nanosamur.ai`
-- `NANOSAMURAI_ISSUER` – OIDC realm issuer, e.g. `http://127.0.0.1:8080/realms/nanosamurai` or `https://auth.nanosamur.ai/realms/nanosamurai`
+- `NANOSAMURAI_ISSUER` – issuer URL of your OIDC provider, e.g. a Keycloak realm `http://127.0.0.1:8080/realms/nanosamurai`
 - `NANOSAMURAI_CLIENT_ID`
 - `NANOSAMURAI_CLIENT_SECRET`
+
+Any OIDC provider that supports the `client_credentials` grant works. The SDK
+reads the token endpoint from the issuer's discovery document. It sends the
+secret in the form body, or with HTTP Basic when discovery lists only
+`client_secret_basic`. If the token response has no `expires_in`, the token is
+reused for 60 seconds.
 
 ## CLI
 
@@ -203,6 +209,35 @@ print("total", page.total, "drafts", page.drafts_count)
 Omit `show_drafts` to use the server default. Recording detail and its persisted
 transcript dictionaries retain `track_id`, `model` and `provider_profile_id`.
 Use `get_recording(session_id, track_id="whisperx")` to filter transcript history.
+
+### REST: session access
+
+Lists contain only sessions the caller may read. Pass `scope="mine"` or
+`scope="shared"` to filter them. Each item has an `access` object with the
+audience and whether the caller owns the session.
+
+```python
+access = client.get_session_access(session_id)
+client.set_session_access(session_id, visibility="selected",
+                          recipient_ids=[colleague_id], revision=access["revision"])
+```
+
+Visibility is `private`, `selected` or `tenant` (everyone in the organization).
+Sharing is read-only. Only the owner can change it; a stale `revision` returns
+409. Inaccessible sessions return 404, and owner-only actions on a shared
+session return 403.
+
+What a credential sees depends on its kind (chosen when it is created in the
+UI; the token flow is the same):
+
+- A **personal** key acts as the person who created it. Sessions it records
+  are theirs: they see, play, share and delete them in the UI. By default the
+  key reads only the sessions it recorded; it can be created to read
+  everything its owner can read. The key may share its own sessions.
+- An **organization** key owns the sessions it records. They start with the
+  key's audience (its manager only, or everyone in the organization), and the
+  key's manager manages them in the UI. The key reads only its own sessions
+  and cannot share them.
 
 ### REST: list workflows and webhooks
 

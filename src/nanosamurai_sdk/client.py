@@ -21,7 +21,7 @@ This client covers the endpoints that make sense for 3rd parties:
   - /ws/audio (binary PCM16LE frames)
 
 Auth model:
-- Uses OAuth2 client_credentials against Keycloak to mint an access token.
+- Uses OAuth2 client_credentials against the OIDC provider to mint an access token.
 - Sends `Authorization: Bearer <token>` to REST + WS.
 
 All WS methods are async.
@@ -41,7 +41,7 @@ import httpx
 import websockets
 
 from .errors import ApiError, WsError
-from .token import KeycloakM2MTokenProvider
+from .token import OIDCClientCredentialsTokenProvider
 from .streaming import StreamState, audio_query, completion_ready, track_ids
 
 
@@ -91,7 +91,7 @@ class NanosamuraiClient:
 
     Inputs:
         api_url: Base URL of the BFF (e.g. `http://127.0.0.1:8000` or `https://bff...`).
-        issuer: Keycloak realm issuer (for discovery).
+        issuer: OIDC issuer (for discovery), e.g. a Keycloak realm URL.
         client_id: M2M client id.
         client_secret: M2M client secret.
         timeout_s: REST timeout.
@@ -108,7 +108,7 @@ class NanosamuraiClient:
     ) -> None:
         self._api_url = api_url.rstrip("/") + "/"
         self._timeout_s = timeout_s
-        self._token_provider = KeycloakM2MTokenProvider(
+        self._token_provider = OIDCClientCredentialsTokenProvider(
             issuer=issuer,
             client_id=client_id,
             client_secret=client_secret,
@@ -258,6 +258,38 @@ class NanosamuraiClient:
             raise ApiError("Invalid response from /api/sessions/:id", status_code=resp.status_code, body=resp.text)
         return data
 
+    def get_session_access(self, session_id: str) -> dict[str, Any]:
+        """Return who can read a session.
+
+        Calls: GET /api/sessions/:session_id/access
+
+        The response has ``visibility`` (``private``, ``selected`` or
+        ``tenant``), ``revision``, ``is_owner`` and, for the owner only,
+        ``recipients``. Inaccessible sessions raise ``ApiError`` with 404.
+        """
+
+        return self._rest_json("GET", f"/api/sessions/{session_id}/access")
+
+    def set_session_access(self, session_id: str, *, visibility: str, revision: int,
+                           recipient_ids: list[str] | None = None) -> dict[str, Any]:
+        """Replace a session's audience (owner only, read-only sharing).
+
+        Calls: PUT /api/sessions/:session_id/access
+
+        ``visibility`` is ``private``, ``selected`` (requires ``recipient_ids``
+        of active people in the same organization) or ``tenant`` (everyone in
+        the organization). Send the ``revision`` from ``get_session_access``;
+        a stale revision raises ``ApiError`` with 409. A personal API key
+        may share the sessions it recorded; an organization key receives 403.
+        """
+
+        if visibility not in ('private', 'selected', 'tenant'):
+            raise ValueError('visibility must be "private", "selected" or "tenant"')
+        body: dict[str, Any] = {'visibility': visibility, 'revision': int(revision)}
+        if recipient_ids is not None:
+            body['recipient_ids'] = list(recipient_ids)
+        return self._rest_json("PUT", f"/api/sessions/{session_id}/access", json_body=body)
+
     def finish_session(self, session_id: str) -> dict[str, Any]:
         """Explicitly mark a session as finished.
 
@@ -271,15 +303,22 @@ class NanosamuraiClient:
         return self._rest_json("POST", f"/api/sessions/{session_id}/finish")
 
     def list_recordings(self, *, limit: int = 200, offset: int = 0,
-                        show_drafts: bool | None = None) -> list[RecordingItem]:
+                        show_drafts: bool | None = None,
+                        scope: str | None = None) -> list[RecordingItem]:
         """Return page items; use list_recordings_page() for pagination counts."""
-        return self.list_recordings_page(limit=limit, offset=offset, show_drafts=show_drafts).items
+        return self.list_recordings_page(limit=limit, offset=offset, show_drafts=show_drafts,
+                                         scope=scope).items
 
     def list_recordings_page(self, *, limit: int = 200, offset: int = 0,
-                             show_drafts: bool | None = None) -> RecordingPage:
-        """List recordings/sessions for the authenticated tenant.
+                             show_drafts: bool | None = None,
+                             scope: str | None = None) -> RecordingPage:
+        """List the sessions the caller may read.
 
         Calls: GET /api/recordings
+
+        ``scope`` is ``"all"`` (default), ``"mine"`` or ``"shared"``. An API
+        key reads only the sessions it recorded, unless it is a personal key
+        created to read everything its owner can read.
         """
 
         params: dict[str, Any] = {'limit': limit, 'offset': offset}
@@ -287,6 +326,10 @@ class NanosamuraiClient:
             if not isinstance(show_drafts, bool):
                 raise TypeError('show_drafts must be a boolean or None')
             params['show_drafts'] = str(show_drafts).lower()
+        if scope is not None:
+            if scope not in ('all', 'mine', 'shared'):
+                raise ValueError('scope must be "all", "mine" or "shared"')
+            params['scope'] = scope
         url = self._rest_url(f"/api/recordings?{urlencode(params)}")
         with httpx.Client(timeout=self._timeout_s) as client:
             resp = client.get(url, headers=self._authz_headers())
