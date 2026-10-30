@@ -72,8 +72,8 @@ negotiate the old flat realtime-tuning protocol. See [migration notes](#migratio
 
 ## Endpoint configuration
 
-The SDK is self-hosting friendly. Hosted nanosamur.ai URLs are examples only;
-set these values to your own deployment when running locally or on-prem.
+The SDK is self-hosting friendly. Set the API URL and issuer to your own
+deployment when running locally or on-prem.
 
 CLI flags:
 
@@ -90,7 +90,7 @@ Environment variables:
 
 The CLI (and examples) read configuration from:
 
-- `NANOSAMURAI_API_URL` – base URL of samuraibff, e.g. `http://127.0.0.1:8000` or `https://platform.nanosamur.ai`
+- `NANOSAMURAI_API_URL` – base URL of samuraibff, e.g. `http://127.0.0.1:8000` or `https://bff.example.com`
 - `NANOSAMURAI_ISSUER` – issuer URL of your OIDC provider, e.g. a Keycloak realm `http://127.0.0.1:8080/realms/nanosamurai`
 - `NANOSAMURAI_CLIENT_ID`
 - `NANOSAMURAI_CLIENT_SECRET`
