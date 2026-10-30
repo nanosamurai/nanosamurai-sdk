@@ -31,8 +31,8 @@ async def test_transcribe_pcm_includes_track_settings_in_audio_ws_url(
         return _DummyWs()
 
     client = NanosamuraiClient(
-        api_url="https://platform.nanosamur.ai",
-        issuer="https://auth.nanosamur.ai/realms/nanosamurai",
+        api_url="https://api.example.test",
+        issuer="https://id.example.test/realms/nanosamurai",
         client_id="x",
         client_secret="y",
     )
@@ -101,8 +101,8 @@ async def test_transcribe_pcm_includes_stream_controls_in_audio_ws_url(
         return _DummyWs()
 
     client = NanosamuraiClient(
-        api_url="https://platform.nanosamur.ai",
-        issuer="https://auth.nanosamur.ai/realms/nanosamurai",
+        api_url="https://api.example.test",
+        issuer="https://id.example.test/realms/nanosamurai",
         client_id="x",
         client_secret="y",
     )
