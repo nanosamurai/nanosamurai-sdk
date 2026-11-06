@@ -182,6 +182,22 @@ Notes:
 - for MVP, the CLI validates the WAV is **mono 16-bit PCM @ 16kHz**.
 - the BFF expects PCM16LE frames on `/ws/audio`.
 
+### Transcribe an audio or video file (upload)
+
+```bash
+nanosamurai transcribe file path/to/interview.m4a --lang en
+nanosamurai transcribe file talk.webm --final-tracks whisperx,qwen --store-recording true
+nanosamurai transcribe file meeting.mp3 --no-wait   # print {"session_id", "title"} and return
+```
+
+The file is uploaded to `POST /api/sessions/upload` and transcribed by the
+selected final tracks only (no realtime or refined output). Common containers
+work (WAV, MP3, AAC, FLAC, Ogg/Opus, MP4/M4A/MOV, WebM/MKV, AVI, AIFF, AMR,
+WMA, CAF); the server checks the contents, and the local file name is not
+sent. The command waits until every selected final track has a transcript
+(`--wait-timeout-s`, default 3600) and prints the recording detail. The server
+limits the file size (default 128 MiB) and duration (default 4 hours).
+
 ## Python SDK usage
 
 ### REST: list recordings
@@ -209,6 +225,18 @@ print("total", page.total, "drafts", page.drafts_count)
 Omit `show_drafts` to use the server default. Recording detail and its persisted
 transcript dictionaries retain `track_id`, `model` and `provider_profile_id`.
 Use `get_recording(session_id, track_id="whisperx")` to filter transcript history.
+
+### REST: transcribe a file
+
+```python
+detail = client.transcribe_file("interview.m4a", lang="en", timeout_s=3600)
+for row in detail["transcripts"]["final"]:
+    print(row["track_id"], row["full_text"])
+
+# Or without waiting:
+session = client.upload_file("interview.m4a", final_tracks=["whisperx"])
+detail = client.wait_for_final_transcripts(session["session_id"])
+```
 
 ### REST: session access
 
