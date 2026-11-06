@@ -149,6 +149,20 @@ nanosamurai recordings get <session_id> --track-id whisperx
 nanosamurai recordings audio <session_id> --out out.wav
 ```
 
+### Export a saved transcript
+
+Formats: `srt`, `vtt`, `txt`, `json`, `docx`. `--stage` is `final` (default) or
+`refined`; without `--track-id` the server uses the first stored track. You can
+export each session you can read.
+
+```bash
+nanosamurai recordings export <session_id> --format srt --out transcript.srt
+nanosamurai recordings export <session_id> --format docx --track-id whisperx --out transcript.docx
+```
+
+In Python, `client.export_transcript(session_id, "vtt", stage="final", track_id="whisperx")`
+returns the file content as bytes.
+
 ### Transcribe a WAV file (streams to WS)
 
 ```bash

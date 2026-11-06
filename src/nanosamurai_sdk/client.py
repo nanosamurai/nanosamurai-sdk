@@ -9,6 +9,7 @@ This client covers the endpoints that make sense for 3rd parties:
   - GET /api/recordings
   - GET /api/recordings/:session_id
   - GET /api/recordings/:session_id/audio
+  - GET /api/recordings/:session_id/export
   - DELETE /api/recordings/:session_id
   - GET /api/sessions/:session_id/webhook-delivery-outcomes
   - Speakers: /api/speakers, /api/speaker-enrollment/from-recording
@@ -43,6 +44,8 @@ import websockets
 from .errors import SERVER_STOP_REASONS, ApiError, SessionStoppedError, WsError
 from .token import OIDCClientCredentialsTokenProvider
 from .streaming import StreamState, audio_query, completion_ready, track_ids
+
+EXPORT_FORMATS = ("srt", "vtt", "txt", "json", "docx")
 
 
 @dataclass(frozen=True)
@@ -677,6 +680,47 @@ class NanosamuraiClient:
         if resp.status_code // 100 != 2:
             raise ApiError("Failed to fetch recording", status_code=resp.status_code, body=resp.text)
         return resp.json()
+
+    def export_transcript(
+        self,
+        session_id: str,
+        format: str,
+        *,
+        stage: str | None = None,
+        track_id: str | None = None,
+    ) -> bytes:
+        """Download one saved transcript track as a file.
+
+        Calls: GET /api/recordings/:session_id/export
+
+        Inputs:
+            session_id: Session UUID.
+            format: One of EXPORT_FORMATS (srt, vtt, txt, json, docx).
+            stage: "final" (server default) or "refined".
+            track_id: Track to export; the server picks the first stored track when omitted.
+
+        Returns:
+            File content as bytes (UTF-8 text, or a DOCX zip package).
+
+        Raises:
+            ValueError for an unknown format; ApiError on non-2xx.
+        """
+
+        if format not in EXPORT_FORMATS:
+            raise ValueError(f"format must be one of {', '.join(EXPORT_FORMATS)}")
+        if track_id is not None:
+            track_ids([track_id], 'track_id')
+        params = {"format": format}
+        if stage is not None:
+            params["stage"] = stage
+        if track_id is not None:
+            params["track_id"] = track_id
+        url = self._rest_url(f"/api/recordings/{session_id}/export")
+        with httpx.Client(timeout=self._timeout_s) as client:
+            resp = client.get(url, headers=self._authz_headers(), params=params)
+        if resp.status_code // 100 != 2:
+            raise ApiError("Failed to export transcript", status_code=resp.status_code, body=resp.text)
+        return resp.content
 
     def delete_recording(self, session_id: str) -> dict[str, Any]:
         """Delete a recording (session) for the current tenant.

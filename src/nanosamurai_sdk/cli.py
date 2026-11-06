@@ -11,6 +11,7 @@ Subcommands:
   - recordings list
   - recordings get <session_id>
   - recordings audio <session_id> --out <path>
+  - recordings export <session_id> --format <fmt> --out <path>
   - transcribe wav <path>
 """
 
@@ -26,7 +27,7 @@ from typing import Any
 
 from .audio import wav_to_pcm_frames
 from .streaming import track_ids
-from .client import NanosamuraiClient
+from .client import EXPORT_FORMATS, NanosamuraiClient
 from .errors import NanosamuraiError
 
 
@@ -99,6 +100,16 @@ def _cmd_recordings_audio(args: argparse.Namespace) -> int:
     if not args.out:
         raise SystemExit("--out is required")
     client.download_recording_audio(args.session_id, args.out)
+    return 0
+
+
+def _cmd_recordings_export(args: argparse.Namespace) -> int:
+    client = _build_client(args)
+    content = client.export_transcript(
+        args.session_id, args.format, stage=args.stage, track_id=args.track_id
+    )
+    with open(args.out, "wb") as f:
+        f.write(content)
     return 0
 
 
@@ -177,6 +188,14 @@ def main(argv: list[str] | None = None) -> None:
     p_rec_audio.add_argument("session_id")
     p_rec_audio.add_argument("--out", required=True, help="Output .wav path")
     p_rec_audio.set_defaults(_cmd="recordings_audio")
+
+    p_rec_export = rec_sub.add_parser("export", help="Export a saved transcript track to a file")
+    p_rec_export.add_argument("session_id")
+    p_rec_export.add_argument("--format", required=True, choices=EXPORT_FORMATS)
+    p_rec_export.add_argument("--stage", choices=["final", "refined"], help="Default: final")
+    p_rec_export.add_argument("--track-id", help="Default: the first stored track")
+    p_rec_export.add_argument("--out", required=True, help="Output file path")
+    p_rec_export.set_defaults(_cmd="recordings_export")
 
     # transcribe
     p_transcribe = sub.add_parser("transcribe", help="Transcription commands")
@@ -268,6 +287,9 @@ def main(argv: list[str] | None = None) -> None:
 
         if args._cmd == "recordings_audio":
             raise SystemExit(_cmd_recordings_audio(args))
+
+        if args._cmd == "recordings_export":
+            raise SystemExit(_cmd_recordings_export(args))
 
         if args._cmd == "transcribe_wav":
             raise SystemExit(asyncio.run(_cmd_transcribe_wav(args)))
