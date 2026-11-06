@@ -5,6 +5,7 @@ This client covers the endpoints that make sense for 3rd parties:
 - REST:
   - GET /api/me
   - POST /api/sessions (supports workflow/webhook overrides)
+  - POST /api/sessions/upload (audio/video file, multipart)
   - PATCH /api/sessions/:session_id
   - GET /api/recordings
   - GET /api/recordings/:session_id
@@ -34,6 +35,7 @@ from dataclasses import dataclass
 import inspect
 import json
 from pathlib import Path
+import time
 from typing import Any, AsyncIterator, Iterable
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
@@ -301,6 +303,143 @@ class NanosamuraiClient:
         """
 
         return self._rest_json("POST", f"/api/sessions/{session_id}/finish")
+
+    def upload_file(
+        self,
+        path: str | Path,
+        *,
+        title: str | None = None,
+        lang: str = "",
+        final_tracks: list[str] | None = None,
+        store_recording: bool | None = None,
+        upload_timeout_s: float = 600.0,
+    ) -> dict[str, Any]:
+        """Create a session from an audio or video file.
+
+        Calls: POST /api/sessions/upload (multipart field ``file``)
+
+        The file is streamed from disk. The server checks the file contents,
+        not its name, and transcribes it asynchronously with the selected final
+        tracks (server default when ``final_tracks`` is None).
+
+        Inputs:
+            path: Local file path.
+            title: Optional session title (at most 200 characters).
+            lang: Optional language code such as ``en``; empty lets the track detect it.
+            final_tracks: Optional non-empty list of configured final track IDs.
+            store_recording: Keep the converted recording for playback; None
+                uses the server default (true). More than one track needs true.
+            upload_timeout_s: Read timeout while the server stores the file.
+
+        Returns:
+            ``{"session_id": str, "title": str}``
+
+        Raises:
+            ApiError: non-2xx response, for example 413 ``file-too-large`` or
+                415 ``unsupported-media-type``.
+        """
+
+        fields: dict[str, str] = {}
+        if title is not None:
+            fields["title"] = title
+        if lang:
+            fields["lang"] = lang
+        ids = track_ids(final_tracks, "final_tracks")
+        if ids is not None:
+            fields["final_tracks"] = ",".join(ids)
+        if store_recording is not None:
+            if not isinstance(store_recording, bool):
+                raise TypeError("store_recording must be a boolean or None")
+            fields["store_recording"] = str(store_recording).lower()
+
+        source = Path(path)
+        timeout = httpx.Timeout(self._timeout_s, read=max(self._timeout_s, upload_timeout_s))
+        with source.open("rb") as media:
+            files = {"file": ("upload", media, "application/octet-stream")}
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.post(
+                    self._rest_url("/api/sessions/upload"),
+                    headers=self._authz_headers(),
+                    data=fields,
+                    files=files,
+                )
+        if resp.status_code // 100 != 2:
+            raise ApiError("Failed to upload file", status_code=resp.status_code, body=resp.text)
+        data = resp.json()
+        if not isinstance(data, dict) or not isinstance(data.get("session_id"), str):
+            raise ApiError(
+                "Invalid response from /api/sessions/upload",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        return data
+
+    def wait_for_final_transcripts(
+        self,
+        session_id: str,
+        *,
+        timeout_s: float = 3600.0,
+        poll_interval_s: float = 5.0,
+    ) -> dict[str, Any]:
+        """Poll recording detail until every selected final track has a transcript.
+
+        Uses the session's persisted stream controls, so it also works for
+        sessions created by ``upload_file``.
+
+        Returns:
+            Recording detail (``GET /api/recordings/:session_id``).
+
+        Raises:
+            ApiError: on REST errors other than a transient 404/503, or on
+                timeout (for example when the server could not decode the file).
+        """
+
+        if timeout_s <= 0 or poll_interval_s <= 0:
+            raise ValueError("Timeout and poll interval must be greater than zero")
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                detail = self.get_recording(session_id)
+            except ApiError as error:
+                if error.status_code not in (404, 503):
+                    raise
+            else:
+                if completion_ready(detail, set(), 0.0):
+                    return detail
+            if time.monotonic() + poll_interval_s > deadline:
+                raise ApiError(
+                    "Timed out waiting for final transcripts",
+                    body=json.dumps({"session_id": session_id}),
+                )
+            time.sleep(poll_interval_s)
+
+    def transcribe_file(
+        self,
+        path: str | Path,
+        *,
+        title: str | None = None,
+        lang: str = "",
+        final_tracks: list[str] | None = None,
+        store_recording: bool | None = None,
+        timeout_s: float = 3600.0,
+        poll_interval_s: float = 5.0,
+    ) -> dict[str, Any]:
+        """Upload a file and wait for its final transcripts.
+
+        Combines ``upload_file`` and ``wait_for_final_transcripts``. Returns
+        recording detail with ``transcripts.final`` filled.
+        """
+
+        session = self.upload_file(
+            path,
+            title=title,
+            lang=lang,
+            final_tracks=final_tracks,
+            store_recording=store_recording,
+        )
+        return self.wait_for_final_transcripts(
+            session["session_id"], timeout_s=timeout_s, poll_interval_s=poll_interval_s
+        )
 
     def list_recordings(self, *, limit: int = 200, offset: int = 0,
                         show_drafts: bool | None = None,
