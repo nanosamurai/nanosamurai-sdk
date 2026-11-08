@@ -13,6 +13,7 @@ Subcommands:
   - recordings audio <session_id> --out <path>
   - recordings export <session_id> --format <fmt> --out <path>
   - transcribe wav <path>
+  - transcribe file <path> (upload any audio/video file; final transcript)
 """
 
 from __future__ import annotations
@@ -155,6 +156,32 @@ async def _cmd_transcribe_wav(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_transcribe_file(args: argparse.Namespace) -> int:
+    client = _build_client(args)
+    session = client.upload_file(
+        args.path,
+        title=args.title,
+        lang=args.lang,
+        final_tracks=args.final_tracks,
+        store_recording=_parse_bool_or_none(args.store_recording),
+        upload_timeout_s=args.upload_timeout_s,
+    )
+    if args.no_wait:
+        _print_json(session)
+        return 0
+    sys.stderr.write(
+        f"Uploaded; session {session['session_id']}. Waiting for the final transcript...\n"
+    )
+    _print_json(
+        client.wait_for_final_transcripts(
+            session["session_id"],
+            timeout_s=args.wait_timeout_s,
+            poll_interval_s=args.poll_interval_s,
+        )
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="nanosamurai", description="nanosamurai-sdk CLI")
     parser.add_argument("--api-url", help="BFF base URL (or env NANOSAMURAI_API_URL)")
@@ -265,6 +292,40 @@ def main(argv: list[str] | None = None) -> None:
     )
     p_wav.set_defaults(_cmd="transcribe_wav")
 
+    p_file = t_sub.add_parser(
+        "file",
+        help="Upload an audio or video file and wait for its final transcript",
+    )
+    p_file.add_argument("path")
+    p_file.add_argument("--title", help="Session title (default: server generated)")
+    p_file.add_argument("--lang", default="", help="Language code, e.g. en (default: detect)")
+    p_file.add_argument(
+        "--final-tracks", type=lambda value: track_ids(value.split(","), "tracks"),
+        help="Comma-separated final track IDs; omit to use the server default",
+    )
+    p_file.add_argument(
+        "--store-recording",
+        default=None,
+        help="Keep the recording for later playback (true|false). Omit to use server default.",
+    )
+    p_file.add_argument(
+        "--no-wait", action="store_true",
+        help="Print the new session id and return without waiting for the transcript",
+    )
+    p_file.add_argument(
+        "--upload-timeout-s", type=float, default=600.0,
+        help="Read timeout while the server stores the file (default: 600)",
+    )
+    p_file.add_argument(
+        "--wait-timeout-s", type=float, default=3600.0,
+        help="Maximum time to wait for the final transcript (default: 3600)",
+    )
+    p_file.add_argument(
+        "--poll-interval-s", type=float, default=5.0,
+        help="Recording-detail polling interval while waiting (default: 5)",
+    )
+    p_file.set_defaults(_cmd="transcribe_file")
+
     args = parser.parse_args(argv)
 
     try:
@@ -293,6 +354,9 @@ def main(argv: list[str] | None = None) -> None:
 
         if args._cmd == "transcribe_wav":
             raise SystemExit(asyncio.run(_cmd_transcribe_wav(args)))
+
+        if args._cmd == "transcribe_file":
+            raise SystemExit(_cmd_transcribe_file(args))
 
         raise SystemExit(f"Unknown command: {args._cmd}")
     except (NanosamuraiError, ValueError, TypeError) as e:
