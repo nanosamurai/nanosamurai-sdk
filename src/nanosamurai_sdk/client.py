@@ -390,8 +390,9 @@ class NanosamuraiClient:
             Recording detail (``GET /api/recordings/:session_id``).
 
         Raises:
-            ApiError: on REST errors other than a transient 404/503, or on
-                timeout (for example when the server could not decode the file).
+            ApiError: on REST errors other than a transient 404/503, when the
+                session fails (for example the server could not convert an
+                uploaded file), or on timeout.
         """
 
         if timeout_s <= 0 or poll_interval_s <= 0:
@@ -406,6 +407,12 @@ class NanosamuraiClient:
             else:
                 if completion_ready(detail, set(), 0.0):
                     return detail
+                if (detail.get("session") or {}).get("status") == "failed":
+                    raise ApiError(
+                        "The session failed; an uploaded file may not be a readable audio "
+                        "or video file with sound",
+                        body=json.dumps({"session_id": session_id, "status": "failed"}),
+                    )
             if time.monotonic() + poll_interval_s > deadline:
                 raise ApiError(
                     "Timed out waiting for final transcripts",

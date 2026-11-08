@@ -133,6 +133,20 @@ def test_wait_for_final_transcripts_times_out(monkeypatch) -> None:
         _client().wait_for_final_transcripts(SESSION_ID, timeout_s=30, poll_interval_s=5)
 
 
+@respx.mock
+def test_wait_for_final_transcripts_stops_when_the_session_fails(monkeypatch) -> None:
+    monkeypatch.setattr("nanosamurai_sdk.client.time.sleep", lambda _s: None)
+    failed = _detail([])
+    failed["session"]["status"] = "failed"
+    route = respx.get(DETAIL_URL).mock(
+        side_effect=[httpx.Response(200, json=_detail([])), httpx.Response(200, json=failed)]
+    )
+
+    with pytest.raises(ApiError, match="session failed"):
+        _client().wait_for_final_transcripts(SESSION_ID, poll_interval_s=0.01)
+    assert route.call_count == 2
+
+
 def _file_args(**overrides) -> SimpleNamespace:
     values = dict(
         path="interview.mp3",
