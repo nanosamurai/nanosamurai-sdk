@@ -238,6 +238,9 @@ session = client.upload_file("interview.m4a", final_tracks=["whisperx"])
 detail = client.wait_for_final_transcripts(session["session_id"])
 ```
 
+Waiting raises `ApiError` when the session fails, for example when the server
+cannot convert the file, instead of polling until the timeout.
+
 ### REST: session access
 
 Lists contain only sessions the caller may read. Pass `scope="mine"` or
